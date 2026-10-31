@@ -7,12 +7,12 @@ ever exercised.
 
 ## Ran
 
-**Unit tests.** `python3 -m unittest discover -s tests` -> `Ran 93 tests ... OK`: 37 in-process tests in
+**Unit tests.** `python3 -m unittest discover -s tests` -> `Ran 103 tests ... OK`: 44 in-process tests in
 `tests/test_core.py` (hook parsing, the proposal parser, the gate arithmetic, the provenance ceiling,
-redaction, the two tests from the code review, and the answer scorer's six verdict branches) plus 56 in
+redaction, the two tests from the code review, and the answer scorer's six verdict branches) plus 59 in
 `tests/test_cli.py`, where every call is a real
 subprocess of `sleep.py`, `tools/wire.py`, `install.sh` or `uninstall.sh` against a throwaway `$SLEEP_HOME`.
-No test reaches the network or a model. Two of those 76 exist only because of the real `promote` below: one
+No test reaches the network or a model. Two of those 103 exist only because of the real `promote` below: one
 asserts a promoted file carries the memory text and not only frontmatter, one asserts the index is copied
 before it is rewritten. Both were checked load-bearing: with the fix removed, each one fails.
 
