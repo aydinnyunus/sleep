@@ -47,6 +47,37 @@ Requirements:
 
 The installer runs the test suite first, creates backups before configuration changes, and is safe to run again.
 
+### Pi / OmO extension
+
+Pi and OmO require Sleep's user-installed extension for automatic integration:
+
+```bash
+./install.sh --extension
+```
+
+The installer links this repository's `extension/` directory to:
+
+```text
+~/.omo/agent/extensions/sleep
+```
+
+The extension loads on the next Pi or OmO session and performs three jobs:
+
+- captures user messages and relevant tool activity into T0,
+- injects matching T1 provisional memory into the agent context,
+- wakes the sleep policy after the agent settles.
+
+Verify that it loaded:
+
+```bash
+omo -p 'hi' >/dev/null 2>&1
+tail -4 ~/.sleep/logs/extension.log
+```
+
+The log should contain `session_start`, `publish`, and `agent_settled` entries.
+
+Without this extension, the Sleep CLI still works when you run commands manually, and Claude Code can still use its own hooks. Pi and OmO, however, will not capture sessions, inject provisional memory, or trigger sleep automatically.
+
 To remove Sleep and restore the backed-up configuration:
 
 ```bash
@@ -170,7 +201,7 @@ Run `./sleep.py <command> --help` for command-specific options.
 | Agent | Integration |
 |---|---|
 | Claude Code | `UserPromptSubmit`, `PostToolUse`, `Stop`, and `PreCompact` hooks |
-| Pi / OmO | Native extension using the same memory store and policy gates |
+| Pi / OmO | Required user-installed extension: `./install.sh --extension` |
 
 Both integrations share `$SLEEP_HOME`, so candidates reviewed from one client are visible to the other when the project scope matches.
 

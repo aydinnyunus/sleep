@@ -434,7 +434,7 @@ clean, including `never return MEMORY.md as a raw string, parse it first`.
   every call prints `[claude-code:unrecognized_model] {"model":"qwen3.8-125b","query_source":"sdk"}` on stderr while
   its own `init` event reports that same model. A future reader of `nightly.log` will therefore see a warning line on
   a pass that worked.
-- **Pi-side command hooks.** Layer 2b (the native extension) is the working Pi path and is the one that has been driven for real. The Claude-shaped entries in `~/.omo/agent/hooks.json` on this machine are dead configuration, and the pruning fix has since run against the real file: the 21:27 install removed the sleep `PostToolUse` object and left the `Write|Edit|MultiEdit` entry with both lint hooks inside it. What is still unproven on that file is `uninstall`, which has only ever been driven in a sandbox.
+- **Pi-side command hooks.** Layer 2b (the user-installed extension) is the working Pi path and is the one that has been driven for real. The Claude-shaped entries in `~/.omo/agent/hooks.json` on this machine are dead configuration, and the pruning fix has since run against the real file: the 21:27 install removed the sleep `PostToolUse` object and left the `Write|Edit|MultiEdit` entry with both lint hooks inside it. What is still unproven on that file is `uninstall`, which has only ever been driven in a sandbox.
 - **arXiv:2606.03979 is sourced, not confirmed.** Re-fetched the Google Research post on 2026-10-31: its body
   links `arxiv.org/pdf/2606.03979` and the Acknowledgements credit Ali Behrouz (Google and Cornell), Farnoosh
   Hashemi (Cornell), Adel Javanmard (Google and USC) and Vahab Mirrokni, which is the attribution in
