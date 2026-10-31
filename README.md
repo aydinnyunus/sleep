@@ -24,6 +24,7 @@ Sleep adds a reviewable memory cycle to Pi, OmO, and Claude Code. It records use
 - **Automatic capture.** Hooks and the Pi extension collect useful observations while you work.
 - **Budgeted consolidation.** Sleep runs only after the record and time gates pass.
 - **Review before permanence.** New memories stay provisional until you promote or refuse them.
+- **Nightly dream cycle.** Mine repeated preferences, consolidate recent observations, and measure memory effects while you are away.
 - **Measured replay.** Run the same task with memory off and on before deciding whether a memory helps.
 - **Repeated preference detection.** `mine` finds instructions you gave in multiple sessions without a model call.
 - **Project isolation.** A project's provisional memory is injected only into that project.
@@ -109,6 +110,42 @@ session activity -> T0 buffer -> gated sleep -> T1 provisional memory
                                                    |
                                              T2 permanent memory
 ```
+
+## Dream cycle
+
+Dream is Sleep's unattended reflection phase. It does not update model weights and it never writes permanent memory on its own.
+
+A dream pass performs three steps:
+
+1. **Mine.** Find instructions you repeated across separate sessions in the same project. This step is deterministic and makes no model call.
+2. **Consolidate.** When the sleep gate passes, ask the configured model to turn recent T0 observations into provisional T1 candidates.
+3. **Replay.** When replay is due, run selected tasks with provisional memory off and on, then write a comparison report.
+
+Every result stays reviewable. Candidates remain in T1 until you explicitly run `promote`.
+
+Preview the complete dream pass without model calls or writes:
+
+```bash
+./sleep.py nightly --dry-run
+```
+
+Run it now:
+
+```bash
+./sleep.py nightly --force
+```
+
+Run the two dream components separately when you want more control:
+
+```bash
+./sleep.py mine --dry-run
+./sleep.py mine
+
+./sleep.py replay --limit 3              # show the replay plan
+./sleep.py replay --run --limit 3 --budget 0.10
+```
+
+`--budget` is the maximum cost per task across both replay arms. Dream reports are written under `$SLEEP_HOME/reports/` and never trigger promotion automatically.
 
 ## Useful commands
 
