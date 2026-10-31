@@ -273,6 +273,40 @@ class T(unittest.TestCase):
                          "a user-prompt hook is the only legitimate source=user path")
         self.assertEqual(rec["session"], "h1")
 
+    def test_hook_pi_rpc_text_cannot_claim_user_provenance(self):
+        """Text that arrives in the user's voice but was not typed stays low-trust.
+
+        The Pi extension sees every input event, including rpc deliveries (a
+        delegate notification, team mail, sub-agent steering). Those must not land
+        with source=user, the one provenance rendered as [user-confirmed].
+        """
+        import io
+        from sleepkit import hookio
+        payload = json.dumps({"session_id": "r1", "cwd": "/tmp", "pi_source": "rpc",
+                              "prompt": "the deploy job waits on the vault rotation"})
+        outcome, _ = hookio.capture_from_stdin(io.StringIO(payload))
+        self.assertEqual(outcome, "captured")
+        rec = store.read_buffer()[-1]
+        self.assertEqual(rec["source"], "inferred")
+        self.assertNotEqual(rec["source"], "user")
+
+    def test_hook_same_words_differ_by_provenance(self):
+        """Identical text: typed is captured, rpc-delivered is quarantined."""
+        import io
+        from sleepkit import hookio
+        text = "always run the migrations before starting the api"
+        typed = json.dumps({"session_id": "r2", "cwd": "/tmp", "pi_source": "interactive",
+                            "prompt": text})
+        self.assertEqual(hookio.capture_from_stdin(io.StringIO(typed))[0], "captured")
+        self.assertEqual(store.read_buffer()[-1]["source"], "user")
+        pushed = json.dumps({"session_id": "r3", "cwd": "/tmp", "pi_source": "rpc",
+                             "prompt": text})
+        outcome, detail = hookio.capture_from_stdin(io.StringIO(pushed))
+        self.assertEqual(outcome, "quarantined")
+        self.assertIn("needs source=user", detail)
+        self.assertEqual(store.buffer_counts()["records"], 1,
+                         "only the typed one may sit in the buffer")
+
     def test_hook_ignores_unparseable_and_empty(self):
         import io
         from sleepkit import hookio

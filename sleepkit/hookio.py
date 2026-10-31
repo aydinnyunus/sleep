@@ -59,6 +59,26 @@ def user_text(payload: dict) -> str:
     return ""
 
 
+# A Pi `input` event says where its text came from. Only typing is the human.
+_HUMAN_PI_SOURCES = ("interactive",)
+
+
+def provenance(payload: dict) -> str:
+    """Provenance of a user-prompt payload, from the transport's own marker.
+
+    Claude hooks only ever fire for the person at the keyboard, so a payload with
+    no marker is source=user. The Pi extension can also see text that arrived in
+    the user's voice but was not typed by the user (an rpc delegate notification,
+    team mail, sub-agent steering): that keeps "inferred", the lowest ceiling.
+    Without this split, machine-delivered text inherits the one provenance allowed
+    to speak as a directive, which is exactly what safety.py exists to prevent.
+    """
+    marker = payload.get("pi_source")
+    if marker is None:
+        return "user"
+    return "user" if str(marker) in _HUMAN_PI_SOURCES else "inferred"
+
+
 def capture_from_stdin(stdin=None, kind: str = "preference",
                        tags: tuple[str, ...] = ("hook:userprompt",)) -> tuple[str, str]:
     """Returns (outcome, detail); outcome is captured|refused|quarantined|ignored."""
@@ -75,7 +95,7 @@ def capture_from_stdin(stdin=None, kind: str = "preference",
         return "ignored", "no user text in payload"
     if len(text) > MAX_CHARS:
         return "ignored", "payload too large"
-    ok, detail = store.capture(text, kind=kind, source="user",
+    ok, detail = store.capture(text, kind=kind, source=provenance(payload),
                                session=str(payload.get("session_id") or ""),
                                cwd=str(payload.get("cwd") or ""), tags=list(tags))
     if ok:
