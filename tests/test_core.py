@@ -24,7 +24,7 @@ MEMORY = os.path.join(TMP, "memory-repo")
 os.makedirs(MEMORY, exist_ok=True)
 with open(os.path.join(MEMORY, "MEMORY.md"), "w", encoding="utf-8") as fh:
     fh.write("# Project Memory Index\n\n## User Preferences\n"
-             "- **existing** — hand written, must survive untouched\n")
+             "- **existing**: hand written, must survive untouched\n")
 
 
 class T(unittest.TestCase):
@@ -105,7 +105,7 @@ class T(unittest.TestCase):
         with open(os.path.join(MEMORY, "MEMORY.md"), encoding="utf-8") as fh:
             after = fh.read()
         # hand written content survives byte-for-byte
-        self.assertIn("- **existing** — hand written, must survive untouched\n", after)
+        self.assertIn("- **existing**: hand written, must survive untouched\n", after)
         self.assertTrue(after.startswith(before.split("## User")[0]))
         self.assertIn("sleep:begin", after)
         files = [f for f in os.listdir(MEMORY) if f.endswith(".md") and f != "MEMORY.md"]

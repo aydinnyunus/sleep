@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# PostToolUse trace + sleep trigger for the Pi/senpi surface (Katman 2).
+# PostToolUse trace + sleep trigger for the Pi/senpi surface (Layer 2).
 #
 # Why not UserPromptSubmit here: PostToolUse is the only event verified to fire in
 # this harness (~/.omo/agent/hooks.json ships a live PostToolUse entry), and this

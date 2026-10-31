@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""sleepctl — wake-time capture, offline consolidation, measured promotion.
+"""sleepctl: wake-time capture, offline consolidation, measured promotion.
 
 Tier model:
   T0 buffer      cheap, disposable, written during the session
@@ -147,7 +147,7 @@ def cmd_doctor(a) -> int:
 def cmd_replay(a) -> int:
     tasks = replay_mod.load_tasks(a.tasks)
     if not a.run:
-        _p("dry run — would execute %d task(s) x2 conditions (read-only tools, "
+        _p("dry run: would execute %d task(s) x2 conditions (read-only tools, "
            "$%.2f/task). Pass --run to execute." % (min(len(tasks), a.limit), a.budget))
         for t in tasks:
             _p("  %-16s %s" % (t.get("id"), t.get("criteria", "")))

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Wake-phase capture (Katman 2). UserPromptSubmit -> T0 with source=user.
+# Wake-phase capture (Layer 2). UserPromptSubmit -> T0 with source=user.
 #
 # This is the only path that may produce source=user records, because it sees the
 # user's own words instead of a model's summary of them. Parsing and every gate

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Install the sleep cycle: skill (Katman 1), hooks (Katman 2), optional nightly
+# Install the sleep cycle: skill (Layer 1), hooks (Layer 2), optional nightly
 # job and Pi extension. Nothing here writes into the memory repo; only
 # `sleep.py promote` ever does, and only when a human asks for it.
 #
@@ -38,7 +38,7 @@ echo "  $("$PY" -V) at $PY"
 step "state dirs"
 run "$PY" -c "import os,sys; os.makedirs(sys.argv[1], exist_ok=True)" "$SLEEP_HOME"
 
-step "Katman 1 - skill"
+step "Layer 1 - skill"
 SKILL_TARGET="$CLAUDE_HOME/skills/sleep"
 if [ -e "$SKILL_TARGET" ] && [ ! -L "$SKILL_TARGET" ]; then
   echo "  existing $SKILL_TARGET kept aside"
@@ -48,7 +48,7 @@ run mkdir -p "$CLAUDE_HOME/skills"
 run ln -sfn "$ROOT/skill/sleep" "$SKILL_TARGET"
 echo "  $SKILL_TARGET -> $ROOT/skill/sleep  (shared skill root: visible to Pi and Claude Code)"
 
-step "Katman 2 - hooks"
+step "Layer 2 - hooks"
 cd "$ROOT"
 run "$PY" tools/wire.py --settings "$CLAUDE_HOME/settings.json" --profile claude $([ "$DRY" = 1 ] && echo --dry-run)
 run "$PY" tools/wire.py --settings "$OMO_HOME/hooks.json"       --profile pi     $([ "$DRY" = 1 ] && echo --dry-run)

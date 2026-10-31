@@ -52,7 +52,7 @@ $SLEEP sleep --force           # ignore the gate (still cost-capped by --budget)
 $SLEEP distill --dry-run       # skip policy, show the prompt payload
 ```
 
-The model proposes to **stdout only** — it runs read-only and has no write access
+The model proposes to **stdout only**: it runs read-only and has no write access
 anywhere. Python parses the proposal blocks and applies redaction, quarantine,
 trust ceiling and dedupe to each one, so a poisoned proposal cannot skip a check
 and a run that goes wrong cannot leave a trusted file behind. Buffer pruning happens

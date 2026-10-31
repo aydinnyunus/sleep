@@ -1,20 +1,20 @@
 // @ts-nocheck
-// Sleep extension for Pi/OmO (Katman 2b).
+// Sleep extension for Pi/OmO (Layer 2b).
 //
 // Three jobs, all mechanical:
-//   1. capture: kullanici sozunu ve path tasiyan arac olaylarini T0 tamponuna tasir
-//   2. publish: gecici hafizayi oturuma acik mesaj olarak geri koy, compaction'dan sonra tekrar koy
-//   3. wake: konsolidasyonu politika kapisindan gecirerek uyut (model cagrisi = beklemeden)
+//   1. capture: move the user's own words and tool events that carry a path into the T0 buffer
+//   2. publish: put the provisional memory back into the session as a message, and again after compaction
+//   3. wake: trigger consolidation through the policy gate (a model call = never blocking)
 //
-// Neden bu dosya bir hook degil: motor (OmO/senpi 5.1.51) Claude-bicimli command hook
-// calistirmiyor. Olculdu: yan etkisiz probe ~/.omo/agent/hooks.json ve <cwd>/.senpi/hooks.json
-// icinde, taze `omo -p` ve PTY ile surulmus interaktif oturum -> sifir ates. Bu yuzden
-// payload'i motorun kendi olaylarindan kendimiz tasiyoruz; payload alanlari hook
-// betiklerinin bekledigi Claude bicimindedir. Ayristirma, kapilar ve ates sayaci
-// Python tarafinda (sleepkit/hookio.py); burada karar yok, sadece tasima var.
+// Why this file is not a hook: the engine (OmO/senpi 5.1.51) does not run Claude-style command
+// hooks. Measured: a side-effect-free probe in ~/.omo/agent/hooks.json and <cwd>/.senpi/hooks.json,
+// driven by a fresh `omo -p` and an interactive PTY session -> zero fires. So we carry the payload
+// ourselves from the engine's own events; the payload fields are in the Claude shape the hook
+// scripts expect. Parsing, gates and the fire counter live on the Python side
+// (sleepkit/hookio.py); there are no decisions here, only transport.
 //
-// Stdout'a hicbir sey yazilmaz, hicbir handler firlatmaz. T2'ye buradan yazilmaz:
-// kalici hafiza yalnizca insanin `promote` komutuyla degisir.
+// Nothing is ever written to stdout and no handler throws. T2 is never written from here:
+// durable memory changes only through the human's `promote` command.
 import { execFile, spawn } from "node:child_process";
 import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, realpathSync, renameSync, statSync } from "node:fs";
 import os from "node:os";
@@ -26,10 +26,10 @@ const PROVISIONAL_TYPE = "sleep-provisional-memory";
 const DISABLED = () => process.env.SLEEP_DISABLE === "1";
 
 /**
- * Repo kokunu bul. Motor bizi ~/.omo/agent/extensions/sleep symlink'i uzerinden yukluyor;
- * symlink cozulmezse ".." yanlis dizine gider. import.meta.dirname de guvenilir degil:
- * motor yukleyicisinde undefined => "paths[0] ... got undefined" ile extension hic
- * yuklenmiyordu (olculdu). sleep.py gercekten olan aday secilir; SLEEP_REPO ile ezilebilir.
+ * Find the repo root. The engine loads us through the ~/.omo/agent/extensions/sleep symlink;
+ * if the symlink is not resolved, ".." points at the wrong directory. import.meta.dirname is not
+ * reliable either: it is undefined in the engine's loader, so the extension failed to load with
+ * "paths[0] ... got undefined" (measured). The candidate with a real sleep.py wins; SLEEP_REPO overrides.
  */
 function findRepo() {
   const fromSelf = (() => {
@@ -52,7 +52,7 @@ const SLEEPCTL = process.env.SLEEPCTL || path.join(REPO, "sleep.py");
 const SLEEP_HOME = process.env.SLEEP_HOME || path.join(os.homedir(), ".sleep");
 const LOG_DIR = path.join(SLEEP_HOME, "logs");
 
-/** Python'daki paths.now() ile ayni bicim: yerel saat + UTC offset (saat dilimi yanilmasina karsi). */
+/** Same shape as paths.now() in Python: local time + UTC offset (guards against timezone confusion). */
 function ts() {
   const d = new Date();
   const pad = (n) => String(n).padStart(2, "0");
@@ -63,23 +63,23 @@ function ts() {
     + (off >= 0 ? "+" : "-") + pad(Math.floor(abs / 60)) + pad(abs % 60);
 }
 
-/** Yuklenme/yakalama/enjeksiyon izi. olmadan "extension yuklenmedi" ile "yuklendi, bir sey yapmadi" ayirt edilemez. */
+/** Load / capture / injection trace. Without it, "extension not loaded" and "loaded but did nothing" are indistinguishable. */
 function note(kind, detail = "") {
   try {
     mkdirSync(LOG_DIR, { recursive: true });
     const file = path.join(LOG_DIR, "extension.log");
     let st = null;
-    try { st = statSync(file); } catch { /* ilk yazim */ }
+    try { st = statSync(file); } catch { /* first write */ }
     if (st && st.size > TRACE_LIMIT) renameSync(file, file + ".1");
     appendFileSync(file, ts() + "\t" + kind + "\t" + String(detail).slice(0, 200) + "\n");
-  } catch { /* iz, oturumu asla kiramaz */ }
+  } catch { /* tracing must never break the session */ }
 }
 
 function sessionId(ctx) {
   try { return ctx?.sessionManager?.getSessionId?.() || ""; } catch { return ""; }
 }
 
-/** sleepctl'i bekleyerek calistirir. Asla firlatmaz. */
+/** Runs sleepctl and waits. Never throws. */
 function sleepctl(args, timeoutMs = 20000) {
   if (DISABLED()) return Promise.resolve({ ok: false, reason: "sleep disabled (SLEEP_DISABLE=1)" });
   if (!existsSync(SLEEPCTL)) return Promise.resolve({ ok: false, reason: "sleep.py missing at " + SLEEPCTL });
@@ -93,7 +93,7 @@ function sleepctl(args, timeoutMs = 20000) {
   });
 }
 
-/** hookio'nun stdin adapter'ina Claude-bicimli payload tasir (motor hook'u calistirmiyor, biz tasiriz). */
+/** Passes a Claude-shaped payload to hookio's stdin adapter (the engine runs no hooks, we do the passing). */
 function runHook(mode, payload, timeoutMs = 8000) {
   if (DISABLED()) return Promise.resolve();
   return new Promise((resolve) => {
@@ -116,8 +116,8 @@ function runHook(mode, payload, timeoutMs = 8000) {
 }
 
 /**
- * Konsolidasyon bir model cagrisidir (~1-2 dk): nohup gibi ayrik, bekletmeden.
- * Bekleten surum 20 sn timeout'ta olduruluyor ve hicbir oneri uretemiyordu.
+ * Consolidation is a model call (~1-2 min): detached like nohup, never blocking.
+ * The blocking version was killed at the 20s timeout and could never produce a proposal.
  */
 function runDetached(args, logName = "hook.log") {
   if (DISABLED()) return;
@@ -126,7 +126,7 @@ function runDetached(args, logName = "hook.log") {
   try {
     mkdirSync(LOG_DIR, { recursive: true });
     fd = openSync(path.join(LOG_DIR, logName), "a");
-  } catch { /* log yoksa cikti kaybolur, is yine de gorsun */ }
+  } catch { /* without a log the output is lost, but the job must run anyway */ }
   try {
     const child = spawn(SLEEPCTL, args, {
       cwd: REPO,
@@ -171,7 +171,7 @@ function alreadyPublished(messages) {
 }
 
 export default function sleep(pi, options = {}) {
-  // tool_execution_end'de arguman olmuyor; path'i start'tan eslestiriyoruz.
+  // tool_execution_end carries no arguments, so we map the path from the start event.
   const started = new Map();
   let publishedThisSession = false;
 
@@ -189,7 +189,7 @@ export default function sleep(pi, options = {}) {
       note("publish", `injected ${block.length} chars into project=${ctx?.cwd || "?"}`);
     } catch (err) {
       note("publish", `sendMessage failed: ${String(err?.message || err).slice(0, 120)}`);
-      /* custom mesaj kabul etmeyen bir oturum hafizasiz calisir */
+      /* a session that rejects custom messages just runs without provisional memory */
     }
   }
 
@@ -198,11 +198,11 @@ export default function sleep(pi, options = {}) {
     await publish(ctx, true);
   });
 
-  // Kullanicinin kendi sozu -> T0 source=user (Claude tarafindaki UserPromptSubmit'in karsiligi).
-  // Bu handler hicbir mesaji yakalamaz/degistirmez; sadece kopyalar.
+  // The user's own words -> T0 source=user (the counterpart of UserPromptSubmit on the Claude side).
+  // This handler never intercepts or modifies a message; it only copies.
   pi.on("input", async (event, ctx) => {
     if (DISABLED()) return;
-    if (event?.source === "extension") return; // extension'in koydugu mesaj kullanici sozu degil
+    if (event?.source === "extension") return; // a message placed by an extension is not the user's own words
     const text = typeof event?.text === "string" ? event.text.trim() : "";
     if (!text) return;
     await runHook("capture", {
@@ -225,15 +225,15 @@ export default function sleep(pi, options = {}) {
     }
   });
 
-  // PostToolUse karsiligi: yalnizca basariyla bitmis ve path tasiyan cagrilar.
+  // Counterpart of PostToolUse: only calls that succeeded and carry a path.
   pi.on("tool_execution_end", async (event, ctx) => {
     if (DISABLED()) return;
     const key = String(event?.toolCallId ?? "");
     const begin = started.get(key);
     started.delete(key);
-    if (event?.isError) return; // olmayan dosyayi okumak "dosyaya dokundu" demek degil
+    if (event?.isError) return; // reading a nonexistent file does not mean "touched the file"
     const p = pathOf(begin?.input);
-    if (!p) return; // bash/eval gibi pathsiz cagrilar: bosuna surec acma
+    if (!p) return; // calls without a path (bash/eval): don't spawn a process for nothing
     await runHook("capture-tool", {
       hook_event_name: "PostToolUse",
       tool_name: begin?.toolName || String(event?.toolName || ""),
@@ -244,12 +244,12 @@ export default function sleep(pi, options = {}) {
     note("capture", `posttool tool=${begin?.toolName || event?.toolName} path=${p.slice(0, 200)}`);
   });
 
-  // Compaction onceki gecici mesaji siler; gecici hafiza tam da bundan sonra kurtarilmali.
+  // Compaction drops the provisional message; provisional memory is exactly what must be recovered after it.
   pi.on("session_compact", async (_event, ctx) => {
     note("session_compact", `reason=${_event?.reason || "?"}`);
     publishedThisSession = false;
     await publish(ctx);
-    runDetached(["sleep", "--force"]); // compress-on-sleep: bekletmeden
+    runDetached(["sleep", "--force"]); // compress-on-sleep: never blocking
   });
 
   pi.on("context", (event) => {
@@ -257,7 +257,7 @@ export default function sleep(pi, options = {}) {
     if (alreadyPublished(event?.messages)) publishedThisSession = true;
   });
 
-  // Claude tarafindaki Stop hook'unun karsiligi: tur bitti, kapilar Python'da.
+  // Counterpart of the Claude Stop hook: the turn ended, the gates live in Python.
   pi.on("agent_end", async (_event) => {
     if (DISABLED()) return;
     note("agent_end", JSON.stringify({ messages: Array.isArray(_event?.messages) ? _event.messages.length : null }));
@@ -292,7 +292,7 @@ export default function sleep(pi, options = {}) {
       note("command", `verb=${verb} argv=${invocation.join(" ")} cwd=${ctx?.cwd || "?"}`);
       if (detached) {
         runDetached(invocation, verb === "replay" ? "replay.log" : "hook.log");
-        ctx.ui?.notify?.(`sleep: ${verb} ayrik calisiyor, sonuc ~.sleep/logs icine yaziliyor`, "info");
+        ctx.ui?.notify?.(`sleep: ${verb} runs detached, the result is written into ~.sleep/logs`, "info");
         return;
       }
       const out = await sleepctl(invocation);

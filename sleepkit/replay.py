@@ -1,8 +1,8 @@
 """Layer 3: measured promotion, report-only.
 
 A candidate is only worth persisting if it demonstrably helps. We cannot prove
-that from a transcript, so we run the same task twice in clean contexts — once
-with the candidate withheld, once with it injected as context — and report the
+that from a transcript, so we run the same task twice in clean contexts: once
+with the candidate withheld, once with it injected as context, and report the
 difference. Nothing here ever promotes automatically.
 
 Read-only tool whitelist, per-task budget, and a quarantine pre-check on the
@@ -155,7 +155,7 @@ def write_report(rep: dict) -> str:
             d.get("num_turns", "n/a"), r["output_similarity"]))
     L += ["", "## Criteria", ""]
     for r in rep["rows"]:
-        L.append("- **%s** — %s" % (r["id"], r["criteria"] or "(none recorded)"))
+        L.append("- **%s**: %s" % (r["id"], r["criteria"] or "(none recorded)"))
     if rep["skipped"]:
         L += ["", "## Skipped (quarantine pre-check)", ""]
         for s in rep["skipped"]:

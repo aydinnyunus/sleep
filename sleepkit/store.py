@@ -279,7 +279,7 @@ def promote(cid: str, memory_dir: str | None = None, dry_run: bool = False) -> t
     # Expansion-only: if the name is taken, open a new file rather than merging.
     if os.path.exists(dest):
         dest = os.path.join(mdir, "%s-%s.md" % (slugify(body.split(".")[0][:60]), cid[-4:]))
-    line = "- **%s** — [detay](%s). %s" % (
+    line = "- **%s**: [detail](%s). %s" % (
         os.path.basename(dest)[:-3], os.path.basename(dest),
         body.replace("\n", " ")[:220])
     if dry_run:

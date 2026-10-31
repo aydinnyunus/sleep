@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Sleep trigger (Katman 2). Stop / PreCompact -> policy-gated consolidation.
+# Sleep trigger (Layer 2). Stop / PreCompact -> policy-gated consolidation.
 #
 # Returns immediately: the consolidation is a background model call, and a hook
 # that waits makes the user pay for it twice. All decisions (is there enough in

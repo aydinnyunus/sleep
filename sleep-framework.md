@@ -1,107 +1,107 @@
-# The Sleep Framework — LLM'ler için Sürekli Öğrenmede Bilgi Koruma
+# The sleep framework: retaining knowledge in continual learning for LLMs
 
-> **Kaynak:** [Google Research Blog — "The sleep framework: A new way for LLMs to retain knowledge in continual learning"](https://research.google/blog/the-sleep-framework-a-new-way-for-llms-to-retain-knowledge-in-continual-learning/)
-> **Makale:** [arXiv:2606.03979](https://arxiv.org/abs/2606.03979)
-> **Yazarlar:** Ali Behrouz (Google & Cornell), Farnoosh Hashemi (Cornell), Adel Javanmard (Google & USC), Vahab Mirrokni
-> **Bu dosya:** blog yazısının Türkçe çözümlemesi/özetidir; kaynak metnin birebir çevirisi değildir. Alıntılanmayan her yorum bölümü açıkça "Analiz" başlığı altında ayrılmıştır.
+> **Source:** [Google Research Blog: "The sleep framework: A new way for LLMs to retain knowledge in continual learning"](https://research.google/blog/the-sleep-framework-a-new-way-for-llms-to-retain-knowledge-in-continual-learning/)
+> **Paper:** [arXiv:2606.03979](https://arxiv.org/abs/2606.03979)
+> **Authors:** Ali Behrouz (Google & Cornell), Farnoosh Hashemi (Cornell), Adel Javanmard (Google & USC), Vahab Mirrokni
+> **This file:** an analysis and summary of the blog post, not a word-for-word translation of the source. Every commentary section that is not a quotation is set apart under an explicit "Analysis" heading.
 
 ---
 
-## 1. Problem: dağıtılmış LLM'ler öğrenmeyi bırakıyor
+## 1. The problem: deployed LLMs stop learning
 
-Modern LLM'ler iki mekanizma ile güçlü hale geliyor: **pre-training** ve **in-context learning (ICL)**. Ama model deploy edildikten sonra büyük ölçüde **statik** kalıyor — sabit bir knowledge cutoff ile çalışıyor, yeni bilgi edinemez hale geliyor.
+Modern LLMs become strong through two mechanisms: **pre-training** and **in-context learning (ICL)**. But after deployment the model stays largely **static**: it runs with a fixed knowledge cutoff and can no longer acquire new knowledge.
 
-İki naif çözüm de çalışmıyor:
+Neither naive fix works:
 
-| Yaklaşım | Neden yetmiyor |
+| Approach | Why it falls short |
 |---|---|
-| Parametreleri sürekli güncellemek (SFT / devam eden pre-training) | **Catastrophic forgetting**: yeni görevleri öğrenirken eski görevlerdeki performans ciddi şekilde düşüyor |
-| Sadece ICL / uzun context kullanmak | Bilgi sadece o anlık context penceresi boyunca yaşıyor; session bitince öğrenilen her şey kayboluyor |
+| Continuously updating the parameters (SFT / continued pre-training) | **Catastrophic forgetting**: while new tasks are learned, performance on old tasks drops seriously |
+| Only ICL / long context | Knowledge lives only for the length of that context window; when the session ends, everything learned is gone |
 
-Yani ya **eskiyi feda edip yeniyi öğreniyorsunuz**, ya da **yeniyi hiç öğrenmiyorsunuz**. Yazının iddiası, bu ikilemin yapısal bir çözümü olduğu.
+So either **you sacrifice the old to learn the new**, or **you never learn the new at all**. The post's claim is that this dilemma has a structural solution.
 
-## 2. Temel fikir: uyanık/sleep döngüsü
+## 2. The core idea: a wake/sleep cycle
 
-İnsan beyninin dinlenme sırasında belleği işlemesi (consolidation) örnek alınıyor. Model, sabit bir mimari içinde **periyodik bir yaşam döngüsü** kazanıyor: aktif etkileşim ile offline bellek konsolidasyonu arasında gidip geliyor.
+The starting point is the brain processing memory during rest (consolidation). Inside a fixed architecture the model gains a **periodic life cycle**: it moves back and forth between active interaction and offline memory consolidation.
 
-Geleneksel ML'deki **training / inference ayrımı** burada yapay kabul ediliyor; continual (sürekli) öğrenen bir ajanın durmadan öğrenmesi ve uyum sağlaması gerekiyor.
+The **training / inference split** of traditional ML is treated as artificial here; an agent that learns continually has to keep learning and adapting without stopping.
 
-**İki durum:**
+**Two states:**
 
-1. **Active (wake) phase** — Model girdi alır, işler, etkileşir. Geçici bilgiyi **hızlı, kısa süreli bellek bileşenlerinde** (ör. in-context memory) tutar.
-2. **Sleep phase** — Yeni girdi işlemeyi durdurur; iç hesaplamayı **bellek konsolidasyonu ve kendi kendini iyileştirme**ye yönlendirir.
+1. **Active (wake) phase**: the model takes input, processes it, and interacts. It keeps transient knowledge in **fast, short-term memory components** (for example in-context memory).
+2. **Sleep phase**: it stops processing new input and directs internal computation to **memory consolidation and self-improvement**.
 
-> **Önemli sınırlandırma:** "sleep", "dreaming", "self-improvement" terimleri nörobilimden mecaz. Çerçeve tamamen **sabit bir model mimarisi ve insan tanımlı eğitim kuralları** içinde çalışıyor. Offline sleep fazında model, önceden ayrılmış (pre-allocated) **Mixture-of-Experts (MoE) memory block**larını açıyor ve ağırlıklarını **kendi ürettiği pratik örneklerle** güncelliyor. Yani kod tabanı ve tasarım değişmeden, deploy edilmiş bir modelin otomatik post-training döngüsü çalışıyor.
+> **Important limitation:** "sleep", "dreaming" and "self-improvement" are metaphors borrowed from neuroscience. The framework works entirely inside **a fixed model architecture and human-defined training rules**. In the offline sleep phase the model opens pre-allocated **Mixture-of-Experts (MoE) memory blocks** and updates their weights with **practice examples it generated itself**. So an automatic post-training loop runs on a deployed model while the code base and the design stay the same.
 
-## 3. Sleep sürecinin iki aşaması
+## 3. The two stages of the sleep process
 
-### 3.1 Memory consolidation (NREM uykusu benzetmesi)
+### 3.1 Memory consolidation (the NREM analogy)
 
-Beyinde NREM yavaş-dalga uykusu kırılgan anıları soyutlama ve distilasyonla uzun süreli yapıya aktarır. Çerçeve bunu üç mekanizmayla taklit ediyor:
+In the brain, NREM slow-wave sleep moves fragile memories into long-term structure through abstraction and distillation. The framework imitates this with three mechanisms:
 
-- **Parameter expansion & continuum memory hierarchy** — Catastrophic forgetting'i önlemek için model kapasitesini sleep sırasında dinamik büyütüyor. **MoE + Hope** mimarisi kullanılıyor: yeni açılan **low-rank expert**lar, kararlı **düşük frekanslı** memory block'lara entegre ediliyor. Böylece gelen bilgi eski parametrelere dokunmadan saklanıyor.
-- **Knowledge seeding (yukarı yönlü distilasyon)** — Yüksek frekanslı katmanlardaki (in-context memory) kırılgan kısa süreli bellek, yeni genişletilmiş uzun süreli parametrelere taşınıyor. Araç: **Generalized Knowledge Distillation (GKD)** + RL tabanlı **imitation learning**:
-  - **On-policy distillation:** genişletilmiş student model, kendi örneklediği diziler üzerinde üretilen teacher dağılımlarından token-bazlı geri bildirim alır.
-  - **Learning to Imitate (LTI):** student, teacher üretimi metnin **prefix'lerini tamamlarken** semantik ve mutlak benzerliğe (**Levenshtein distance**) göre ödüllendirilir.
-- **Synaptic pruning** — Konsolidasyon düşük frekanslı modüllere tamamlanınca yüksek frekanslı geçici parametreler **sıfırlanır**; sonraki aktif session'lar için kapasite boşalır.
+- **Parameter expansion and a continuum memory hierarchy**: to prevent catastrophic forgetting, model capacity grows dynamically during sleep. The architecture used is **MoE + Hope**: newly opened **low-rank experts** are integrated into stable **low-frequency** memory blocks. Incoming knowledge is stored without touching the old parameters.
+- **Knowledge seeding (upward distillation)**: fragile short-term memory in the high-frequency layers (in-context memory) is moved into the newly expanded long-term parameters. The instruments are **Generalized Knowledge Distillation (GKD)** plus RL-based **imitation learning**:
+  - **On-policy distillation:** the expanded student model receives token-level feedback from teacher distributions produced over sequences it sampled itself.
+  - **Learning to Imitate (LTI):** the student is rewarded for **completing prefixes** of teacher-produced text, scored on semantic and absolute similarity (**Levenshtein distance**).
+- **Synaptic pruning**: once consolidation into the low-frequency modules is complete, the high-frequency transient parameters are **reset**; capacity is freed for the next active sessions.
 
-> Not: yazı "iki temel teknik mekanizma" diyor ama madde işaretleri üç (expansion, seeding, pruning). Kaynak metindeki küçük bir tutarsızlık; pruning, consolidation'ın kapanış adımı olarak okunabilir.
+> Note: the post says "two core technical mechanisms" but the bullets number three (expansion, seeding, pruning). A small inconsistency in the source text; pruning can be read as the closing step of consolidation.
 
-### 3.2 Dreaming for self-improvement (REM uykusu benzetmesi)
+### 3.2 Dreaming for self-improvement (the REM analogy)
 
-REM sırasında beyin senaryoları simüle eder, semantik bağlantıları pekiştirir, yeni yollar dener. "Dreaming stage"de otonom bir self-improvement döngüsü var:
+During REM the brain simulates scenarios, strengthens semantic links and tries new paths. The dreaming stage contains an autonomous self-improvement loop:
 
-- **Random expert selection** — Sentetik veri üretiminde MoE router sıradışı expert'ları rastgele aktive eder. Model, farklı bilgi alanlarını karıştırmaya ve latent pattern'ler çıkarmaya zorlanır.
-- **Curated rehearsal** — Model sentetik eğitim örnekleri ("dreams") üretir ve **gradient tabanlı veri seçimi** ile filtreler; model yeteneğini en çok artırma potansiyeli olan örnekler öne çıkar.
-- **RL refinement** — En yüksek puanlı dream örnekleri üzerinde SFT yapılır; üretimin downstream görevlerde gerçekten iyileştirip iyileştirmediği ölçülür.
+- **Random expert selection**: during synthetic data generation the MoE router randomly activates unusual experts. The model is forced to mix different knowledge domains and surface latent patterns.
+- **Curated rehearsal**: the model produces synthetic training examples ("dreams") and filters them with **gradient-based data selection**; examples with the highest potential to raise model capability come forward.
+- **RL refinement**: SFT is run on the highest scoring dream examples, and whether generation actually improves downstream tasks is measured.
 
-## 4. Teorik temel
+## 4. Theoretical basis
 
-Yazının iddiası sadece ampirik değil: iki aşamanın neden "yeni bilgi karşılığında eski yeteneği vermek" olmadan continual learning'i destekleyebileceği gerekçelendiriliyor.
+The post's claim is not only empirical: it argues why the two stages can support continual learning without trading old capability for new knowledge.
 
-**Consolidation tarafı:** knowledge seeding, **yapılandırılmış, low-rank bir sıkıştırma problemi** olarak modelleniyor. Model kısa süreli izlerinin her detayını kopyalamıyor; hem kendi on-policy davranışını hem de hedefin ödüllendirdiği semantik nitelikleri en iyi koruyan **kompakt bir yön (direction) kümesi** buluyor. Buradan iki sinyalin tamamlayıcılığı çıkıyor:
+**The consolidation side:** knowledge seeding is modeled as a **structured, low-rank compression problem**. The model does not copy every detail of its short-term traces; it finds a **compact set of directions** that best preserves both its own on-policy behavior and the semantic qualities the target reward favors. The complementarity of the two signals follows from that:
 
-- **on-policy distillation** → konsolidasyonu, modelin inference anında gerçekten üreteceği trajectory'lere hizalar; sadece teacher dağılımı üzerinde eğitimden doğan mismatch'i azaltır.
-- **semantic reward** → neyin saklanmaya değer olduğunu değiştirir; token olasılıklarını eşleştirmek yerine anlamı ve görev-ilişkili davranışı koruyan yönleri önceler.
-- **parameter expansion** → bu seçilmiş anıların, önceki konsolide bilgilerin üzerine yazmadan yazılacak kapasiteyi sağlar.
+- **on-policy distillation** aligns consolidation with the trajectories the model will actually produce at inference time, which cuts the mismatch that comes from training only on the teacher's distribution.
+- **semantic reward** changes what counts as worth storing: instead of matching token probabilities, it prefers the directions that preserve meaning and task-relevant behavior.
+- **parameter expansion** supplies the capacity to write these selected memories without overwriting previously consolidated knowledge.
 
-**Dreaming tarafı:** rastgele expert aktivasyonu ve reward tabanlı örnek seçimi, **öğrenme geometrisini iyileştirme** mekanizmaları olarak karakterize ediliyor. Farklı MoE'leri devreye sokmak, sentetik üretim sırasında keşfedilen gradient yönlerinin kümesini genişletiyor — salt wake-time verinin ürettiğinden daha zengin bir güncelleme havuzu. Gradient tabanlı filtreleme ise en faydalı öğrenme sinyalini taşıyan sentetik deneyleri öne çıkarıyor: bilgilendirici yönleri güçlendirip gradient uzayının yapısını koruyor.
+**The dreaming side:** random expert activation and reward-based example selection are characterized as mechanisms that **improve the learning geometry**. Bringing different MoEs into play widens the set of gradient directions discovered during synthetic generation, which is a richer update pool than wake-time data alone produces. Gradient-based filtering then promotes the synthetic experiences that carry the most useful learning signal: it strengthens informative directions while preserving the structure of gradient space.
 
-Sonuç daha dengeli bir optimizasyon manzarası: öğrenme az sayıda yöne hakimiyet etmiyor, gradient'ler daha iyi koşullu (better conditioned), ilerleme daha kararlı. Yazının vurgusu: **dreaming, kendi kendine veri artırmak (data augmentation) değil; güncellemeleri çeşitlendirme, seçme ve konsolide etme süreci.**
+The result is a more balanced optimization landscape: learning is not dominated by a small number of directions, the gradients are better conditioned, and progress is more stable. The post's emphasis: **dreaming is not self-directed data augmentation; it is a process of diversifying, selecting and consolidating updates.**
 
-## 5. Deneysel sonuçlar
+## 5. Experimental results
 
-> Blogda bu paragrafların üstünde ayrı bir "Sonuçlar/Deneyler" başlığı yok — "Theoretical foundations" altında akıyor. Aşağıdaki tablolaştırma bu dosya için yapıldı.
+> The blog has no separate "Results/Experiments" heading above these paragraphs; they flow under "Theoretical foundations". The tabulation below was made for this file.
 
-| Alan | Benchmark / ayar | Sleep framework | Kıyaslanan baseline'lar |
+| Area | Benchmark / setup | Sleep framework | Baselines compared |
 |---|---|---|---|
-| **Continual translation** | Görülmemiş diller: **Manchu**, **Kalamang**; çok aşamalı (multi-stage) sıralı öğrenme | **near-zero performans düşüşü** (catastrophic forgetting yok) | ICL, Cartridges, SFT → sıralı öğrenmede ağır catastrophic forgetting |
-| **Uzun context anlama** | **BABILong** | **10M token'a kadar near-perfect scaling**; uzun context bilgisini doğrudan parametrik belleğe sıkıştırıyor | GPT-4, Titans |
-| **Faktik bilgi ekleme** | **SQuAD** + continued pre-training (CPT) | **%48.9** (single-task), **%46.2** (CPT) | base model, SFT, SEAL (Self-Adapting LMs) — yeni bilgiyi mevcut temsilleri bozmadan entegre ediyor |
-| **Matematiksel muhakeme** | **AIME 24**, **AIME 25**, **HMMT 25** | **%79.2**, **%69.0**, **%46.1** (sleep-enhanced base model) | SFT, GRPO, OPSD (on-policy self-distillation) — consolidation + imitation learning birlikte daha iyi |
+| **Continual translation** | Unseen languages: **Manchu**, **Kalamang**; multi-stage sequential learning | **near-zero performance drop** (no catastrophic forgetting) | ICL, Cartridges, SFT: heavy catastrophic forgetting in sequential learning |
+| **Long context understanding** | **BABILong** | **near-perfect scaling up to 10M tokens**; it compresses long-context knowledge directly into parametric memory | GPT-4, Titans |
+| **Adding factual knowledge** | **SQuAD** + continued pre-training (CPT) | **48.9%** (single-task), **46.2%** (CPT) | base model, SFT, SEAL (Self-Adapting LMs): integrates new knowledge without corrupting existing representations |
+| **Mathematical reasoning** | **AIME 24**, **AIME 25**, **HMMT 25** | **79.2%**, **69.0%**, **46.1%** (sleep-enhanced base model) | SFT, GRPO, OPSD (on-policy self-distillation): consolidation and imitation learning together do better |
 
-## 6. Sonuç
+## 6. What the paradigm claims
 
-Sleep paradigması, otonom ve sürekli öğrenen AI sistemlere bir yol sunuyor: statik pre-training ve kırılgan context penceresinin ötesine geçip **aktif öğrenme ile offline dinlenme** arasında dönüşümlü çalışarak LLM'ler kısa süreli anıları saklıyor, yeni becerileri uzun süreli parametre yapısına soyutluyor ve catastrophic forgetting olmadan sürekli kendi kendini iyileştiriyor.
+The sleep paradigm offers a path toward autonomous, continually learning AI systems. Instead of resting on static pre-training and a fragile context window, LLMs work in alternation between **active learning and offline rest**: they keep short-term memories, abstract new skills into the long-term parameter structure, and improve themselves continuously without catastrophic forgetting.
 
-## 7. Analiz (blog yazısından değil, benim değerlendirmem)
+## 7. Analysis (not from the blog post; my own assessment)
 
-**Güçlü tarafı:** Yazının asıl katkısı "MoE + distilasyon" kombinasyonundan çok, bunu **bilinen iki probleme ucuz bir yapısal cevap** olarak konumlandırması. Catastrophic forgetting'e karşı "kapasiteyi büyüt, eskiyi yazma" (parameter expansion / MoE routing) ve "kaynağı teacher'ın dağılımı değil, öğrencinin kendi trajectory'si yap" (on-policy GKD) ikilisi, literatürde ayrı ayrı kanıtlanmış iki fikrin bir periyodik döngüde birleştirilmesi. Teorik çerçevenin consolidation'ı "structured low-rank compression" olarak adlandırması da iddiayı test edilebilir kılıyor: gerçekten low-rank mi, hangi rank'ta ne kaybediliyor?
+**Where it is strong:** the post's real contribution is less the "MoE + distillation" combination than its positioning of that combination as **a cheap structural answer to two known problems**. Against catastrophic forgetting there is "grow capacity, do not overwrite the old" (parameter expansion / MoE routing), and "make the source the student's own trajectory rather than the teacher's distribution" (on-policy GKD). That pair takes two ideas already proven separately in the literature and joins them inside one periodic loop. Naming consolidation "structured low-rank compression" also makes the claim testable: is it really low-rank, and what is lost at which rank?
 
-**Rakamlar hakkında temkinli olunması gerekenler:**
-- %79.2 / %69.0 / %46.1 "sleep-enhanced **base-model**" için verilmiş. Baz modelin adı, boyutu ve wake fazında bu benchmark'lara ne kadar maruz kaldığı blogda yok — math reasoning'de bu farkın ne kadarının "daha iyi veri seçimi" ne kadarının "hesap bütçesi" olduğunu ayırmak mümkün değil.
-- SQuAD'da %48.9 tek başına yüksek bir sayı değil; anlamı "base/SFT/SEAL'dan yüksek olması" ve "mevcut temsilleri bozmaması" kombinasyonunda. Blog, forgetting'i ölçen ikinci ekseni (eski görev performansı) sayı vermeden anlatıyor.
-- "10M token'a kadar near-perfect scaling" iddiası en çarpıcısı ve en çok bağlam isteyen: BABILong'daki görev tipi ve baseline'ların context limiti kısıtları olmadan karşılaştırma yapılabilir değil.
-- Benchmark seçimi lehine bir düzen var gibi görünüyor; "unseen language" çeviri, "bilinmeyen dil" = Manchu/Kalamang düşük kaynaklı diller — Hope mimarisinin doğal oyun alanı.
+**Reasons to be careful with the numbers:**
+- 79.2% / 69.0% / 46.1% are given for a "sleep-enhanced **base model**". The blog does not name the base model, give its size, or say how much it was exposed to these benchmarks during the wake phase, so in math reasoning there is no way to separate how much of the gap is better data selection and how much is compute budget.
+- 48.9% on SQuAD is not a high number on its own; its meaning is in the combination of "higher than base/SFT/SEAL" and "does not corrupt existing representations". The blog describes the second axis, old-task performance, without giving a number.
+- "near-perfect scaling up to 10M tokens" is the most striking claim and the one that needs the most context: without the task type in BABILong and the context-limit constraints on the baselines, the comparison cannot be made.
+- The benchmark selection looks arranged in the post's favor. "Unseen language" translation, where the unseen languages are Manchu and Kalamang, low-resource languages, is the Hope architecture's natural playing field.
 
-**Eksik kalan pratik sorular:** maliyet (sleep fazının compute/wall-clock bedeli, kaç wake başına bir sleep), periyotlamanın nasıl seçildiği, pruning'in geri alınamaz bilgi kaybı yaratıp yaratmadığı, router'ın rastgele expert seçiminin tutarlılığı nasıl garanti ettiği, ve güvenlik tarafı: kendi kendini üretilen veriyle eğiten bir döngüde modelin kendi hatalarının (veya wake fazında maruz kaldığı zararlı içeriğin) dream yoluyla pekişmesini kim filtreliyor? "Gradient tabanlı selection" sadece faydalı sinyale bakıyor; bu filtre bir güvenlik kontrolü değil.
+**Practical questions left open:** cost (the compute and wall-clock price of a sleep phase, how many wake phases per sleep), how the period is chosen, whether pruning creates irreversible information loss, how the router guarantees the consistency of its random expert selection, and the security side: in a loop that trains on self-generated data, who filters the model's own errors, or the harmful content it was exposed to during the wake phase, out of being reinforced through dreams? "Gradient-based selection" looks only at useful signal; that filter is not a safety check.
 
-**Kendi işimize tercümesi:** bizim gibi continual learning yapmayan, RAG/ICL ile çalışan sistemler için alınacak asıl fikir "context → parametre" transferi değil, **uyku fazını ayrı bir offline iş olarak modellere ayırmak**: biriktirilen oturum bilgisini periyodik olarak sıkıştırıp kalıcılaştıran, eski versiyonları bozmayan, sıfırlanabilir bir tampon katman. Bu, framework'ün tamamını kurmadan bile taklit edilebilir bir desen.
+**Translated into our own work:** for systems like ours that do not do continual learning and run on RAG/ICL, the idea to take is not the "context to parameter" transfer. It is **carving the sleep phase out as a separate offline job**: a resettable buffer tier that periodically compresses accumulated session knowledge, persists it, and does not corrupt older versions. That pattern is copyable without building the whole framework.
 
-## 8. Bağlantılar
+## 8. Links
 
-- Sleep framework makalesi: https://arxiv.org/abs/2606.03979
-- Hope mimarisi / continual translation: https://arxiv.org/abs/2512.24695
+- Sleep framework paper: https://arxiv.org/abs/2606.03979
+- Hope architecture / continual translation: https://arxiv.org/abs/2512.24695
 - Cartridges: https://arxiv.org/abs/2506.06266
 - SEAL (Self-Adapting LMs): https://arxiv.org/abs/2506.10943
 - BABILong: https://arxiv.org/abs/2406.10149
@@ -109,4 +109,4 @@ Sleep paradigması, otonom ve sürekli öğrenen AI sistemlere bir yol sunuyor: 
 - Mixture of Experts: https://huggingface.co/blog/moe
 - Titans (Google Research): https://research.google/blog/titans-miras-helping-ai-have-long-term-memory/
 
-**Teşekkürler (kaynaktan):** Çalışmayı inceleyenler Yuan Deng, Corinna Cortes. Blog yazımında yardım edenler Mark Simborg, Kimberly Schwede, Tim Herrmann.
+**Acknowledgements (from the source):** Yuan Deng and Corinna Cortes reviewed the work; Mark Simborg, Kimberly Schwede and Tim Herrmann helped with the blog write-up.
