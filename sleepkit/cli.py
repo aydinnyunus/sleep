@@ -53,7 +53,7 @@ def cmd_sleep(a) -> int:
 
 def cmd_status(a) -> int:
     bc = store.buffer_counts()
-    cands = store.list_candidates()
+    cands = store.list_candidates(with_body=True)
     prov = [c for c in cands if c.get("status") == "provisional"]
     q = [f for f in os.listdir(paths.quarantine_dir()) if f.endswith(".json")]
     mdir = paths.memory_dir(a.cwd or None)

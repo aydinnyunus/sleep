@@ -101,6 +101,10 @@ The sleep paradigm offers a path toward autonomous, continually learning AI syst
 ## 8. Links
 
 - Sleep framework paper: https://arxiv.org/abs/2606.03979
+  (Provenance: the five arXiv IDs in this section were transcribed from the Google Research post's own links,
+  which is also where the four author names come from. They were never re-fetched from arxiv.org: that host is
+  blocked by the permission system on the machine where this file was written. Cite them as "the papers the
+  post links", not as independently checked references.)
 - Hope architecture / continual translation: https://arxiv.org/abs/2512.24695
 - Cartridges: https://arxiv.org/abs/2506.06266
 - SEAL (Self-Adapting LMs): https://arxiv.org/abs/2506.10943

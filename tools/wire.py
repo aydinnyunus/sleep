@@ -14,13 +14,17 @@ import json
 import os
 import shutil
 
-# event -> (hook script, profile). "claude" events are verified live in
-# ~/.claude-work/settings.json; the Pi harness only proved PostToolUse.
+# event -> (hook script, profile). Measured on this machine with Claude Code
+# 2.1.294 and a sentinel hook: UserPromptSubmit, PostToolUse and Stop all fire and
+# their payloads carry what the scripts need (tool_name, tool_input.file_path).
+# The Pi/omo engine runs none of these (see README, Limit 4), so no event is wired
+# into its hooks.json any more: Layer 2b covers capture there. An entry left in
+# ~/.omo/agent/hooks.json is dead config, so install removes an old one.
 WIRING = {
     "UserPromptSubmit": ("sleep-capture.sh", "claude"),
     "Stop": ("sleep-consolidate.sh", "claude"),
     "PreCompact": ("sleep-consolidate.sh", "claude"),
-    "PostToolUse": ("sleep-posttool.sh", "pi"),
+    "PostToolUse": ("sleep-posttool.sh", "claude"),
 }
 
 
@@ -45,16 +49,41 @@ def merge(doc: dict, root: str, profile: str, remove: bool):
         if bucket and not shape_ok(bucket):
             report.append("%s: unrecognized shape, left alone" % event)
             continue
-        kept = [e for e in bucket
-                if not any(isinstance(h, dict) and h.get("command") == command
-                           for h in e.get("hooks", []))]
-        changed = len(kept) != len(bucket)
+        # Match on the absolute script path inside the command, not on exact string
+        # equality: an entry written by an older installer may wrap it (``python3 <path>``
+        # or a trailing flag), and a cleanup that cannot see its own old entries leaves
+        # dead config behind. The path is absolute and repo-specific, so this cannot
+        # collide with someone else's hook.
+        # An event's bucket is a list of entries, and one entry can hold several
+        # commands. Dropping the whole entry because one of its commands is ours
+        # would take somebody else's hook with it: the real ~/.omo/agent/hooks.json
+        # on this machine keeps ruff-lint, golangci-lint and a leftover sleep entry in
+        # a single PostToolUse entry. So prune command objects, not entries, and only
+        # then drop whatever became empty.
+        kept, changed = [], False
+        for e in bucket:
+            hooks_list = e.get("hooks")
+            if not isinstance(hooks_list, list):
+                kept.append(e)
+                continue
+            mine = [h for h in hooks_list
+                    if isinstance(h, dict) and command in str(h.get("command", ""))]
+            if not mine:
+                kept.append(e)
+                continue
+            changed = True
+            rest = [h for h in hooks_list if h not in mine]
+            if rest:
+                e = dict(e)
+                e["hooks"] = rest
+                kept.append(e)
         if remove:
-            hooks[event] = [e for e in kept if e.get("hooks")]
+            if kept:
+                hooks[event] = kept
+            else:
+                hooks.pop(event, None)
             if changed:
                 report.append("%s: removed %s" % (event, script))
-            elif event in hooks and not hooks[event] and event not in doc.get("_seen", []):
-                del hooks[event]
             continue
         if changed:
             report.append("%s: already wired, unchanged" % event)
