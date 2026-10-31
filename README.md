@@ -1,19 +1,82 @@
-# Sleep: a sleep cycle for agent memory
+<div align="center">
 
-An adaptation of Google Research's [sleep framework](https://research.google/blog/the-sleep-framework-a-new-way-for-llms-to-retain-knowledge-in-continual-learning/) for the two agents on this machine (Pi/senpi and Claude Code). Both are inference clients, so this is not the model's sleep: it is the sleep of **agent memory**. The breakdown of the post is [`sleep-framework.md`](sleep-framework.md); the measurement log is [`docs/EVIDENCE.md`](docs/EVIDENCE.md).
+# Sleep
 
-The loop in one line: capture cheaply while the agent works, consolidate once behind a policy gate when it stops, and let nothing reach permanent memory until a human promotes it.
+**A sleep cycle for agent memory.**
+
+Capture while agents work. Consolidate when they stop. Promote only with evidence.
+
+[![Tests](https://img.shields.io/badge/tests-127%20passing-c4f042?labelColor=111827&style=flat-square)](#does-it-work)
+[![Python](https://img.shields.io/badge/python-3.10%2B-369eff?labelColor=111827&style=flat-square)](https://www.python.org/)
+[![Runtime dependencies](https://img.shields.io/badge/runtime%20dependencies-0-ffcb47?labelColor=111827&style=flat-square)](#what-is-inside)
+[![Agents](https://img.shields.io/badge/agents-Pi%20%7C%20Claude-a78bfa?labelColor=111827&style=flat-square)](#three-pieces)
+
+</div>
+
+Sleep gives inference-only coding agents a controlled memory lifecycle. It captures observations during work, distills them into provisional candidates with a budgeted model call, measures whether those candidates improve answers, and leaves permanent promotion to a human.
+
+It adapts Google Research's [Sleep Framework](https://research.google/blog/the-sleep-framework-a-new-way-for-llms-to-retain-knowledge-in-continual-learning/) to agents that can change files and context, but cannot update model weights. The result is not pretend training. It is a small, inspectable memory system with provenance, quarantine, budget gates, A/B replay, and an undo path.
+
+<p align="center">
+  <img src=".github/assets/sleep-replay.png" alt="Real Sleep CLI run showing a provisional memory improving a Claude Haiku replay result" width="920" />
+</p>
+
+<p align="center"><em>Real-model replay: without provisional memory the model missed all three private facts; with memory it recovered every one.</em></p>
+
+## Why Sleep
+
+**Dream without blind trust.** A model may summarize the wake buffer, but every proposal passes deterministic safety and provenance gates before it can enter T1.
+
+**Measure memory instead of assuming it helps.** Replay runs the same task with memory off and on, then reports explicit criteria, turns, cost, and answer drift. A tie stays a tie.
+
+**Learn repeated preferences without spending tokens.** The deterministic `mine` step finds instructions said verbatim across separate sessions and emits provisional candidates plus replay task proposals. It never promotes them.
+
+**Keep agents on the same memory loop.** Claude Code hooks and the Pi extension write to the same tiered store without pretending their hook systems are identical.
+
+**Fail closed around dangerous text.** Prompt-injection shapes are quarantined, secrets are redacted, machine-relayed prompts lose the `source=user` exemption, and provisional memory is injected as background rather than instruction.
+
+**Run unattended without losing control.** Record thresholds, minimum intervals, model selection, per-call budgets, dry runs, and report-only replay keep the nightly job bounded and reviewable.
+
+## The loop
+
+```text
+work                         sleep                                  review
+
+T0 wake buffer  ->  policy gate  ->  model distillation  ->  T1 candidates
+      ^                                                        |
+      |                                                        v
+hooks + extension                                      A/B replay report
+                                                               |
+                                                     explicit human promote
+                                                               |
+                                                        T2 permanent memory
+```
+
+T0 is cheap and disposable. T1 is provisional context. T2 is permanent memory, and only `sleepctl promote` can write it.
+
+## Proof, not promise
+
+A real isolated run used a private Caligo routing fact that the model could not know beforehand:
+
+| condition | result |
+|---|---|
+| memory off | missed `X-Caligo-Route`, `violet-heron-731`, and `routes.toml` |
+| memory on | returned all three exact values |
+| replay verdict | `helped`, criteria `miss -> met`, treatment delivered `yes` |
+| measured replay cost | `$0.01124` with `anthropic/claude-haiku-4-5` |
+
+The full implementation notes and measured limits live in [`docs/EVIDENCE.md`](docs/EVIDENCE.md). The source-post analysis is in [`sleep-framework.md`](sleep-framework.md).
 
 ## Install
 
 ```bash
 ./install.sh --dry-run     # print every step, touch nothing
-./install.sh               # runs the 103 tests first, then skill + hooks (with backups)
+./install.sh               # runs the 127 tests first, then skill + hooks (with backups)
 ./install.sh --launchd     # + the nightly pass at 03:41: gated sleep, weekly replay
                            # (03:17 belongs to the skill curator; two quiet jobs should not share a minute)
 ./install.sh --extension   # + symlink the Pi extension into the discovery directory
 ./uninstall.sh             # put the configuration back
-python3 -m unittest discover -s tests   # 103 tests; install.sh runs this same suite first
+python3 -m unittest discover -s tests   # 127 tests; install.sh runs this same suite first
 ```
 
 Install is idempotent: a second run says `already wired, unchanged` and writes nothing. It touches
@@ -32,7 +95,8 @@ survives; emptied event keys are dropped rather than written as `[]`.
 ./sleep.py promote <id>             # T1 -> T2, only with explicit approval (--dry-run first)
 ./sleep.py refuse <id> --note '...' # "this observation is wrong": recorded, not deleted
 ./sleep.py replay --run --limit 3   # A/B measurement, report-only
-./sleep.py nightly --dry-run        # what launchd runs: the gate, then a replay when due
+./sleep.py mine --dry-run           # instructions said in >=2 sessions: T1 + task proposals
+./sleep.py nightly --dry-run        # what launchd runs: mine, then the gate, then replay when due
 ./sleep.py doctor                   # accumulation: repeated headings, candidate/memory overlap
 ```
 
@@ -50,6 +114,30 @@ variables an interactive shell would have passed on are simply absent at 03:41. 
 the home directory. A real environment variable always wins over a line in the file, so an interactive run is never
 overridden; a line that is not `KEY=VALUE` raises instead of being skipped, because skipping is what let one real
 pass run unauthenticated, answer `Not logged in`, and report success.
+The model an unattended pass names is read the same way, per call: an explicit `--model`, then `SLEEP_MODEL`,
+then the `ANTHROPIC_MODEL` line in `$SLEEP_HOME/env`, then the built-in default. The second of those matters more
+than it looks: sleep always names a model on argv, so a gateway routed to one model by its own routing variable
+would be overridden by the built-in name on every night, and the night would look like a quiet night rather than a
+wrong model.
+
+`mine` is the one step that needs no model. It reads the whole T0 archive - the live buffer plus every archived
+generation, which is the only place older sessions still exist - and looks for instruction text said verbatim in
+two or more separate sessions. Repetition across sessions is the cheapest evidence that a sentence is a standing
+preference and not one-off context, and because the test is literal (case and spacing folded, nothing stemmed) the
+output is the person's own words, not a paraphrase. Each hit becomes a T1 candidate at `trust=observed` - repeated,
+therefore worth a look, not therefore true - and a replay task proposal parked in `$SLEEP_HOME/replay/task-proposals.json`,
+never merged into the task file, and deliberately without `criteria_keywords`: a task that grades itself against
+keywords its own proposer wrote is not a measurement. `nightly` runs this before the gated consolidation pass, so a
+night that spends itself failing to reach a model still banks what the person actually repeated.
+
+What it can trust depends on a stamp applied at capture. A prompt is not always the person typing it: a delegate's
+task brief and a one-shot CLI probe both arrive as a typed first message, and the hook cannot tell the difference.
+`capture` therefore demotes text with a report-back protocol in it ("then reply", "reply with exactly one word", a
+sentinel token as the last thing in the message), delegate plumbing, or single-command-probe phrasing. Every prompt
+from a host-spawned session, proven by its transport environment marker, is also demoted regardless of wording. A
+demoted record is still kept - the cost of a false positive is one reversible label - but it loses the `source=user`
+exemption that lets a directive through, and `mine` will not read it as a preference the human repeated on purpose.
+
 Day to day you do nothing: the hooks capture. `~/.sleep/logs/hook-fires.log` counts every event that fired, `~/.sleep/logs/hook.log` records the decision the gate made.
 
 ## Three pieces
@@ -109,14 +197,15 @@ say anything but a tie.
 sleep.py                  20   CLI entry (thin shell over sleepctl)
 sleepkit/                  1974 lines, core, no third-party dependencies
   paths.py                 109   SLEEP_HOME layout, T0/T1/T2 paths, the unattended env file
-  safety.py                107   quarantine, secret stripping, confidence ceiling
-  store.py                 419   tiered store; expansion-only write policy
-  consolidate.py           324   the cycle: gate -> distill -> parse -> ingest through the same gates
-  llm.py                   147   headless model boundary (--bare, budget cap, no Bash, env file)
-  replay.py                376   Layer 3: A/B run, criteria verdict, weekly clock, no write right
+  safety.py                181   quarantine, secret stripping, confidence ceiling
+  store.py                 430   tiered store; expansion-only write policy
+  consolidate.py           352   the cycle: gate -> distill -> parse -> ingest through the same gates
+  llm.py                   168   headless model boundary (--bare, budget cap, no Bash, env file)
+  replay.py                377   Layer 3: A/B run, criteria verdict, weekly clock, no write right
   hookio.py                161   stdin-JSON reader, fire counter, provenance rule
-  cli.py                   326   capture, distill, sleep, nightly, status, show, promote, refuse,
+  cli.py                   353   capture, distill, sleep, nightly, mine, status, show, promote, refuse,
                                  supersede, prune, doctor, replay, inject
+  mine.py                  198   layer 2.5: repeated instructions across the T0 archive, no model call
 hooks/                              Claude-shaped command executors
   sleep-capture.sh          17   UserPromptSubmit -> T0 source=user
   sleep-posttool.sh         33   PostToolUse -> T0 source=agent (path-carrying calls only)
@@ -128,8 +217,8 @@ prompts/consolidate.md           the proposal writer's prompt (NREM-like)
 prompts/replay-task.md           the read-only A/B runner's prompt (REM-like)
 replay/tasks.json                  three fixed replay tasks
 launchd/                          the 03:41 plist: nightly (sleep, plus replay once a week)
-tests/test_core.py         626   44 in-process unit tests
-tests/test_cli.py         1222   59 tests, each a subprocess of sleep.py, wire.py or install.sh
+tests/test_core.py               49 in-process unit tests
+tests/test_cli.py                78 tests, each a subprocess of sleep.py, wire.py or install.sh
 docs/EVIDENCE.md                   what ran, what did not
 install.sh / uninstall.sh        install and undo, backed up, --dry-run supported
 sleep-framework.md                 breakdown of the post, plus critical notes
