@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Nightly sleep. 03:41 on purpose: the skill curator owns 03:17 and both are
+     quiet jobs that should not compete for the same minutes. -->
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.aydinnyunus.sleep-nightly</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/bin/python3</string>
+    <string>__SLEEPCTL__</string>
+    <string>sleep</string>
+    <string>--min-records</string><string>2</string>
+    <string>--min-interval</string><string>0</string>
+    <string>--budget</string><string>1.00</string>
+  </array>
+  <key>StartCalendarInterval</key>
+  <dict><key>Hour</key><integer>3</integer><key>Minute</key><integer>41</integer></dict>
+  <key>StandardOutPath</key><string>__SLEEPHOME__/logs/nightly.log</string>
+  <key>StandardErrorPath</key><string>__SLEEPHOME__/logs/nightly.log</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key><string>/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin</string>
+  </dict>
+</dict>
+</plist>

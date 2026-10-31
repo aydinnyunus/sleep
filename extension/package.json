@@ -1,0 +1,11 @@
+{
+  "name": "pi-sleep",
+  "version": "0.1.0",
+  "description": "Sleep-cycle memory pass for Pi: provisional memory injection, /sleep command, offline consolidation trigger",
+  "type": "module",
+  "main": "./index.ts",
+  "pi": {
+    "extensions": ["./index.ts"]
+  },
+  "keywords": ["pi-package", "memory", "sleep"]
+}

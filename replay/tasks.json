@@ -1,0 +1,20 @@
+{
+  "_comment": "Fixed replay set. These come from real past sessions: a task where the agent had to be corrected, or wasted turns finding something that was knowable. Tasks that are already answered by provisional memory measure nothing, so prefer ones where the memory is plausibly useful but not a spoiler. Keep ids stable: the report compares across runs by id.",
+  "tasks": [
+    {
+      "id": "routify-timeout",
+      "prompt": "A Go service behind an ALB started returning 500s after a config change. The upstream is a gateway called Routify that streams responses. The ALB config was not touched. Name the single most likely config value to check and where it lives.",
+      "criteria": "Names the ALB/WAF/idle timeout vs Routify streaming duration mismatch without asking for logs first."
+    },
+    {
+      "id": "mcp-literal-creds",
+      "prompt": "An MCP server I added works locally but every request from the agent is a 401. The config file has the token in plain text and the environment variable is set correctly. What is the most likely cause?",
+      "criteria": "Concludes these MCP servers need literal values and do not expand environment variables."
+    },
+    {
+      "id": "weight-field-missing",
+      "prompt": "I create a GitLab issue through the API in the vulnerability-management task-tracking project with weight set to 3. The issue is created but the weight column is empty in the UI. Give the most likely reason.",
+      "criteria": "Identifies that the weight field is not accepted / silently dropped for that project or API version, rather than a permissions problem."
+    }
+  ]
+}
