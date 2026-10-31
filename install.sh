@@ -68,24 +68,46 @@ if [ "$LAUNCHD" = 1 ]; then
   else
     mkdir -p "$HOME/Library/LaunchAgents"
     sed -e "s#__SLEEPCTL__#$ROOT/sleep.py#" -e "s#__SLEEPHOME__#$SLEEP_HOME#" \
-        -e "s#/usr/bin/python3#$PY#" "$PLIST_SRC" > "$PLIST_DST"
+        -e "s#__USERHOME__#$HOME#" -e "s#/usr/bin/python3#$PY#" "$PLIST_SRC" > "$PLIST_DST"
+
+    # Lint before anything is loaded, with the STRICT parser. plutil -lint and launchctl
+    # load both accepted a rendered file that python's plistlib rejected: a prose comment
+    # here once contained "--", which XML 1.0 forbids inside a comment. A lenient gate
+    # green-lights a plist some readers cannot open, so the gate is plistlib.
+    if ! "$PY" -c 'import plistlib,sys; plistlib.load(open(sys.argv[1],"rb"))' "$PLIST_DST" 2>/dev/null; then
+      echo "  REFUSED: the rendered plist does not parse ($PLIST_DST)."
+      echo "  Fix $PLIST_SRC. Nothing was loaded."
+
+    # Test seam: render and lint without ever touching a live launchd domain.
+    elif [ "${SLEEP_SKIP_LOAD:-0}" = 1 ]; then
+      echo "  rendered and linted $PLIST_DST (SLEEP_SKIP_LOAD=1: not loaded)"
+
     # launchctl registers in the LOGGED-IN user's domain, which $HOME redirection does
     # not move. A sandboxed install (HOME=/tmp/something) would otherwise load a nightly
     # job into the real session. Measured: a sandbox --launchd run did exactly that, and
     # the job was live until booted out. So only load when HOME is the real home.
-    REAL_HOME="$(dscl . -read /Users/"$(id -un)" NFSHomeDirectory 2>/dev/null | awk '{print $2}')"
-    [ -n "$REAL_HOME" ] || REAL_HOME="$(eval echo ~"$(id -un)")"
-    if [ "$HOME" != "$REAL_HOME" ]; then
-      echo "  rendered $PLIST_DST, NOT loaded: HOME ($HOME) is not the real home ($REAL_HOME)."
-      echo "  launchctl would register this in your live session. To load it for real:"
-      echo "    launchctl load \"$PLIST_DST\""
     else
-      launchctl unload "$PLIST_DST" 2>/dev/null
-      launchctl load "$PLIST_DST" && echo "  loaded $PLIST_DST"
+      REAL_HOME="$(dscl . -read /Users/"$(id -un)" NFSHomeDirectory 2>/dev/null | awk '{print $2}')"
+      [ -n "$REAL_HOME" ] || REAL_HOME="$(eval echo ~"$(id -un)")"
+      if [ "$HOME" != "$REAL_HOME" ]; then
+        echo "  rendered $PLIST_DST, NOT loaded: HOME ($HOME) is not the real home ($REAL_HOME)."
+        echo "  launchctl would register this in your live session. To load it for real:"
+        echo "    launchctl load \"$PLIST_DST\""
+      else
+        launchctl unload "$PLIST_DST" 2>/dev/null
+        launchctl load "$PLIST_DST" && echo "  loaded $PLIST_DST"
+        # launchd hands the job the PATH in that plist and nothing else: no token, no
+        # config dir. Measured here: the first unattended pass answered "Not logged in"
+        # at exit 1 and spent nothing. The login variables belong in a file the owner
+        # protects, not in a plist that sits plain-text in ~/Library/LaunchAgents.
+        if [ ! -f "$SLEEP_HOME/env" ]; then
+          echo "  note: $SLEEP_HOME/env is absent. If the model needs a login token,"
+          echo "        write KEY=VALUE lines there and chmod 600; the nightly reads it."
+        fi
+      fi
     fi
   fi
 fi
-
 if [ "$EXT" = 1 ]; then
   step "Pi extension (opt-in)"
   # $OMO_HOME/extensions/ is an auto-discovered location on this engine - measured,

@@ -153,16 +153,52 @@ def cmd_replay(a) -> int:
             _p("  %-16s %s" % (t.get("id"), t.get("criteria", "")))
             if t.get("skipped"):
                 _p("   -> SKIPPED: " + t["skipped"])
+            elif not replay_mod.criteria_check(t, "")["measurable"]:
+                _p("   -> NOT MEASURABLE: no criteria_keywords, so both arms report")
+                _p("      prose-only criteria and no effect can be shown for this task")
         return 0
     rep = replay_mod.run_suite(tasks_path=a.tasks, limit=a.limit, model=a.model,
                               budget=a.budget)
     p = replay_mod.write_report(rep)
     _p("report: " + p)
+    _p("treatment delivered: %s" % (
+        "yes" if rep.get("treatment_delivered")
+        else "NO - both arms ran the same prompt, so nothing was measured"))
     for r in rep["rows"]:
-        _p("  %-16s turns %s->%s  exit %s->%s  sim %.2f" % (
-            r["id"], r["off"].get("num_turns"), r["on"].get("num_turns"),
-            r["off"]["exit"], r["on"]["exit"], r["output_similarity"]))
+        _p("  %-16s %-46s criteria %-9s turns %s->%s  drift %.2f" % (
+            r["id"], r["verdict"], replay_mod.criteria_cell(r),
+            r["off"].get("num_turns"), r["on"].get("num_turns"), r["answer_drift"]))
+    tally = rep.get("verdict_tally") or {}
+    if tally:
+        _p("  tally: " + ", ".join("%s x%d" % (k, tally[k]) for k in sorted(tally)))
     return 0
+
+
+def cmd_nightly(a) -> int:
+    """One unattended pass: gated consolidation, then a replay pass when it is due.
+
+    Report-only by construction. Nothing on this path reaches T2, so the worst an
+    unattended night can do is spend its budget and leave a report for a person to
+    read. Promotion stays a human act; automating it would let a bad memory become a
+    standing instruction with nobody accountable.
+    """
+    rep = {"ts": paths.now()}
+    rep["sleep"] = consolidate.run_sleep(session=a.session, model=a.model,
+                                         budget_usd=a.budget,
+                                         min_records=a.min_records,
+                                         min_interval_hours=a.min_interval,
+                                         force=a.force, dry_run=a.dry_run)
+    rep["replay"] = replay_mod.nightly(tasks_path=a.replay_tasks, model=a.model,
+                                       budget=a.replay_budget,
+                                       limit=a.replay_limit,
+                                       interval_hours=a.replay_interval,
+                                       dry_run=a.dry_run)
+    _p(json.dumps(rep, indent=2, sort_keys=True, default=str))
+    # "ran" only means the gate let the pass through. If the model call itself failed,
+    # the night produced nothing and must not report success to launchd.
+    slept = rep["sleep"].get("action") in ("skipped", "would-run") or (
+        rep["sleep"].get("action") == "ran" and rep["sleep"].get("ok") is not False)
+    return 0 if slept and not rep["replay"].get("failed") else 3
 
 
 def cmd_inject(a) -> int:
@@ -257,6 +293,26 @@ def main(argv=None) -> int:
     rp.add_argument("--budget", type=float, default=0.50)
     rp.add_argument("--run", action="store_true")
     rp.set_defaults(fn=cmd_replay)
+
+    nt = sub.add_parser("nightly",
+                        help="unattended pass: gated consolidation + replay when due")
+    nt.add_argument("--session")
+    nt.add_argument("--model", default=None)
+    nt.add_argument("--budget", type=float, default=1.00)
+    nt.add_argument("--min-records", type=int, default=3, dest="min_records")
+    nt.add_argument("--min-interval", type=float, default=6.0, dest="min_interval",
+                    help="hours between consolidations")
+    nt.add_argument("--force", action="store_true")
+    nt.add_argument("--dry-run", action="store_true")
+    nt.add_argument("--replay-interval", type=float, default=168.0, dest="replay_interval",
+                    help="hours between unattended replay passes (0 = every night)")
+    nt.add_argument("--replay-limit", type=int, default=3, dest="replay_limit")
+    nt.add_argument("--replay-budget", type=float, default=0.50, dest="replay_budget",
+                    help="per task across both arms, same meaning as replay --budget")
+    nt.add_argument("--replay-tasks", dest="replay_tasks",
+                    default=replay_mod.DEFAULT_TASKS,
+                    help="task file for the unattended replay pass")
+    nt.set_defaults(fn=cmd_nightly)
 
     ij = sub.add_parser("inject", help="print the provisional-memory context block")
     ij.add_argument("--project", default="")

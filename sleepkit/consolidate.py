@@ -13,7 +13,7 @@ import time
 import shutil
 from datetime import datetime
 
-from . import llm, paths, store
+from . import llm, paths, safety, store
 
 _HDR = re.compile(r"^(source|kind|trust|evidence)\s*:\s*(.+)$", re.M)
 
@@ -67,15 +67,24 @@ def distill(session: str | None = None, model: str = llm.DEFAULT_MODEL,
     res = llm.run(system_prompt_file=pf, user_prompt=user,
                   add_dirs=[paths.buffer_dir()],
                   allowed_tools="Read", model=model, budget_usd=budget)
+    _blocks, how = split_blocks(res["stdout"] or "")
     ing = ingest_records(parse_stdout(res["stdout"] or ""), session=session or "",
                          cwd=os.getcwd())
+    ing["parse"] = {"mode": how, "blocks": len(_blocks)}
+    if res["exit"] == 0 and not ing["proposals"] and how == "none":
+        # The model answered and nothing in the answer matched the contract. Say so:
+        # an empty night and a swallowed night are indistinguishable from the outside,
+        # and only one of them is worth reading the log for.
+        ing["warn"] = "the model answered, but no block matched the proposal contract"
     files = ingest_pending(session=session or "")
     ing["proposals"] += files["proposals"]
     ing["accepted"] += files["accepted"]
     ing["refused"] += files["refused"]
     ing["accepted_ids"] += files["accepted_ids"]
     ing["llm_exit"] = res["exit"]
-    ing["llm_tail"] = (res["stdout"] or "")[-400:]
+    # The tail lands in state.json, where it outlives the night. Redact on the way in:
+    # a model that echoes back a credential must not have it filed in plain text.
+    ing["llm_tail"] = safety.redact((res["stdout"] or "")[-400:])[0]
     ing["buffer_records"] = len(recs)
     # "consumed" is what entitles a sleep to prune: the pass produced proposals.
     ing["consumed"] = bool(res["exit"] == 0 and ing["proposals"])
@@ -93,24 +102,85 @@ def parse_proposal(text: str) -> dict:
     return {"fields": fields, "body": body}
 
 
-def parse_stdout(text: str) -> list:
-    """Blocks the model emitted after a PROPOSAL_SEP marker.
+# The contract asks for a line holding exactly the marker above. Real output arrives
+# messier: padded with spaces, wrapped in a code fence, or missing while the blocks are
+# still there. Splitting on one literal string turns a paid call into zero candidates
+# with nothing to show for it, so the split is tolerant and a header-shaped block is a
+# fallback. Neither decides what becomes memory: every block still goes through
+# ingest_records(), which is where the gates live.
+_SEP_LINE = re.compile(r"^[^A-Za-z0-9\n]*PROPOSAL[^A-Za-z0-9\n]*$", re.I | re.M)
+_HDR_LINE = re.compile(r"^(source|kind|trust|evidence)\s*:.*$", re.M)
 
-    Two rules, both about not trusting prose as data: everything before the first
-    marker is discarded (that is the model's commentary, not a proposal), and a
-    block with no real body is dropped rather than guessed at. A run that emits no
-    markers produces no candidates, which is the correct outcome for a session
-    that had nothing worth keeping.
+
+def split_blocks(text: str) -> tuple:
+    """(blocks, how): chunks that could be proposals, and how they were located.
+
+    "marker" when separator lines are present, "header" when a run of contract header
+    lines is there but the marker was not printed, "none" when there is neither. The
+    mode travels back because the difference matters at 03:41: a night where the model
+    had nothing to say is fine, a night where a formatting slip swallowed the answer is
+    a paid call wasted, and from the outside the two look identical.
+
+    The header fallback is line-based rather than a split on blank lines, because a
+    blank line is exactly where the contract puts the headers and the body: splitting
+    there would separate a proposal from its own text. The body is the first paragraph
+    after the header run, which keeps trailing commentary out of the candidate.
     """
-    if PROPOSAL_SEP not in text:
-        return []
+    text = text or ""
+    if _SEP_LINE.search(text):
+        return [b for b in re.split(_SEP_LINE, text)[1:] if b.strip()], "marker"
+
+    lines = text.split("\n")
+    hdr = [bool(_HDR_LINE.match(line)) for line in lines]
+    blocks, i = [], 0
+    while i < len(lines):
+        if not hdr[i]:
+            i += 1
+            continue
+        k = i
+        while k < len(lines) and hdr[k]:
+            k += 1
+        head = lines[i:k]
+        j = k
+        while j < len(lines) and not lines[j].strip():
+            j += 1
+        body = []
+        while j < len(lines) and lines[j].strip():
+            body.append(lines[j])
+            j += 1
+        if body:
+            blocks.append("\n".join(head + [""] + body).strip())
+            i = j
+        else:
+            i = k
+    return (blocks, "header") if blocks else ([], "none")
+
+
+def parse_stdout(text: str) -> list:
+    """Turn model output into proposal blocks, marker-delimited or header-shaped.
+
+    Two rules, both about not trusting prose as data: commentary before the first
+    block is discarded, and a block with no real body is dropped rather than
+    guessed at. Output with neither a marker nor a contract header yields nothing,
+    which is the correct outcome for a session that had nothing worth keeping.
+    """
+    blocks, _how = split_blocks(text)
     out = []
-    for chunk in text.split(PROPOSAL_SEP)[1:]:
+    for chunk in blocks:
         chunk = chunk.strip()
         if chunk.lower().startswith("```"):
             chunk = chunk.split("\n", 1)[1] if "\n" in chunk else ""
         parsed = parse_proposal(chunk)
         body = parsed["body"].strip().strip("`").strip()
+        # Models mirror the opening marker with a closing fence. That fence is
+        # protocol, not memory: stored verbatim it becomes the last line of a
+        # T1 record and then the last line an agent reads months later.
+        lines = body.split("\n")
+        while lines and lines[-1].strip() and set(lines[-1].strip()) <= {"="}:
+            lines.pop()
+        while lines and lines[0].strip() and set(lines[0].strip()) <= {"="}:
+            lines.pop(0)
+        body = "\n".join(lines).strip()
         if len(body) >= MIN_BODY:
             out.append({"fields": parsed["fields"], "body": body})
     return out

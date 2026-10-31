@@ -48,6 +48,17 @@ def state_path() -> str:
     return os.path.join(home(), "state.json")
 
 
+def env_file() -> str:
+    """Optional KEY=VALUE file carrying whatever a headless call needs to log in.
+
+    A launchd job gets the PATH written into its plist and nothing else, so a token an
+    interactive shell would have inherited is simply absent at 03:41. It does not
+    belong in that plist either: LaunchAgents files are plain text in the home
+    directory. It belongs here, written 0600 by its owner and read by this process.
+    """
+    return os.path.join(home(), "env")
+
+
 # --- memory repo resolution ------------------------------------------------
 # Claude Code convention: project key is the cwd with "/" replaced by "-".
 # The user's long-term memory lives in the repo-level memory dir; we only ever

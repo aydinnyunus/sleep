@@ -285,9 +285,16 @@ def promote(cid: str, memory_dir: str | None = None, dry_run: bool = False) -> t
     if dry_run:
         return True, "would write %s (+ index line)" % dest
     os.makedirs(mdir, exist_ok=True)
+    # The T2 copy must carry the memory text and its own verdict. `emit` takes the
+    # body as an argument and this call used to omit it, which wrote a 245-byte
+    # frontmatter husk into the memory store: the only surviving copy of the fact
+    # was then the 220-char index line. The copy is stamped promoted as well, so a
+    # reader inside the memory store never sees a record claiming to be provisional.
+    out_meta = {k: v for k, v in meta.items() if not k.startswith("_")}
+    out_meta["status"] = "promoted"
+    out_meta["promoted_at"] = paths.now()
     with open(dest, "w", encoding="utf-8") as fh:
-        fh.write(emit({k: v for k, v in meta.items() if not k.startswith("_")}))
-        fh.write("\n")
+        fh.write(emit(out_meta, body))
     ok, why = append_index_line(mdir, line)
     set_status(cid, "promoted", {"promoted_to": dest, "promoted_at": paths.now()})
     shutil.move(os.path.join(paths.candidates_dir(), cid + ".md"),
@@ -317,6 +324,16 @@ def append_index_line(memory_dir: str, line: str) -> tuple[bool, str]:
     else:
         add = ("\n%s\n%s\n%s\n" % (IDX_BEGIN, line, IDX_END))
         updated = existing.rstrip("\n") + add
+    # Undo has to be possible without git: the memory store is a plain directory
+    # on this machine (no .git, no parent repo), so the index keeps its own copy.
+    if existing:
+        try:
+            with open(os.path.join(paths.archive_dir("memory"),
+                                   "MEMORY.md.bak-" + paths.now().replace(":", "").replace("+", "_")),
+                      "w", encoding="utf-8") as fh:
+                fh.write(existing)
+        except OSError:
+            pass
     tmp = idx + ".tmp"
     with open(tmp, "w", encoding="utf-8") as fh:
         fh.write(updated)

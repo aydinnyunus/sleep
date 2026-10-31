@@ -12,8 +12,11 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
+
+from . import paths
 
 DEFAULT_MODEL = os.environ.get("SLEEP_MODEL", "anthropic/claude-haiku-4-5")
 
@@ -30,6 +33,53 @@ def binary() -> str:
         if cand and os.path.isfile(cand) and os.access(cand, os.X_OK):
             return cand
     raise FileNotFoundError("claude binary not found; set CLAUDE_BIN")
+
+
+_KEY = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def env_overrides(path: str) -> dict:
+    """Read KEY=VALUE lines from an env file. A missing file means no overrides.
+
+    Parsed here instead of sourced by a shell because this runs in the process that is
+    one step from a paid API call: a shell would also execute whatever the file
+    happens to contain. A malformed line raises rather than being skipped, so a typo
+    costs one loud failure at the start of the night instead of an hour of silent
+    "Not logged in".
+    """
+    out = {}
+    try:
+        with open(path, encoding="utf-8") as fh:
+            lines = fh.readlines()
+    except FileNotFoundError:
+        return {}
+    for n, raw in enumerate(lines, 1):
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("export "):
+            line = line[len("export "):].strip()
+        key, sep, val = line.partition("=")
+        key = key.strip()
+        if not sep or not _KEY.match(key):
+            raise ValueError("%s line %d is not KEY=VALUE: %r" % (path, n, line[:40]))
+        val = val.strip()
+        if len(val) >= 2 and val[0] == val[-1] and val[0] in "\"'":
+            val = val[1:-1]
+        out[key] = val
+    return out
+
+
+def auth_env() -> dict:
+    """Environment for a headless call: this process's env, filled in from the file.
+
+    The real environment wins over the file, so an interactive shell (or a test) is
+    never overridden by a stale value on disk.
+    """
+    env = dict(os.environ)
+    for k, v in env_overrides(paths.env_file()).items():
+        env.setdefault(k, v)
+    return env
 
 
 def parse_json_output(text: str):
@@ -78,7 +128,7 @@ def run(system_prompt_file: str, user_prompt: str, add_dirs: list[str],
         argv += ["--add-dir", d]
     argv += ["--allowed-tools", allowed_tools]
     argv += list(extra or [])
-    env = dict(os.environ)
+    env = auth_env()
     env["CLAUDE_SELF_IMPROVE_ACTIVE"] = "1"   # do not trigger the other pipeline
     env.pop("CLAUDE_CODE_ENTRYPOINT", None)
     try:

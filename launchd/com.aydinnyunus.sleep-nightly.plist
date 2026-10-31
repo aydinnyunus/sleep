@@ -1,6 +1,15 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<!-- Nightly sleep. 03:41 on purpose: the skill curator owns 03:17 and both are
-     quiet jobs that should not compete for the same minutes. -->
+<!-- One unattended pass a night. 03:41 on purpose: the skill curator owns 03:17 and
+     both are quiet jobs that should not compete for the same minutes.
+
+     `nightly` is report-only by construction. It runs the gated consolidation
+     (T0 -> T1 candidates) and, once a week, a replay pass that writes a report.
+     Neither half can write T2, so nothing an unattended night produces can reach a
+     session as a directive. Promotion stays a human running `sleepctl promote`.
+
+     min_interval 0 here, where the hook-driven `sleep` default is 6h: the point of a
+     scheduled run is to consolidate whatever accumulated today, and the record-count
+     gate plus the lock already keep it from being wasteful or concurrent. -->
 <plist version="1.0">
 <dict>
   <key>Label</key><string>com.aydinnyunus.sleep-nightly</string>
@@ -8,10 +17,13 @@
   <array>
     <string>/usr/bin/python3</string>
     <string>__SLEEPCTL__</string>
-    <string>sleep</string>
+    <string>nightly</string>
     <string>--min-records</string><string>2</string>
     <string>--min-interval</string><string>0</string>
     <string>--budget</string><string>1.00</string>
+    <string>--replay-interval</string><string>168</string>
+    <string>--replay-limit</string><string>3</string>
+    <string>--replay-budget</string><string>0.50</string>
   </array>
   <key>StartCalendarInterval</key>
   <dict><key>Hour</key><integer>3</integer><key>Minute</key><integer>41</integer></dict>
@@ -19,7 +31,14 @@
   <key>StandardErrorPath</key><string>__SLEEPHOME__/logs/nightly.log</string>
   <key>EnvironmentVariables</key>
   <dict>
-    <key>PATH</key><string>/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin</string>
+    <!-- launchd hands a job almost no PATH. sleepkit/llm.py probes the user's local
+         bin for the claude binary on its own, so this line is not strictly required,
+         but a headless turn that shells out should see roughly the PATH a human turn
+         sees. install.sh renders the user-home token here. The two home tokens are
+         spelled differently on purpose, so one sed's output cannot become the next
+         one's pattern: a first draft named the shorter token in this comment and the
+         rendered file lost its meaning right here. -->
+    <key>PATH</key><string>__USERHOME__/.local/bin:/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin</string>
   </dict>
 </dict>
 </plist>
