@@ -13,7 +13,7 @@ import json
 import os
 import sys
 
-from . import consolidate, llm, paths, replay as replay_mod, safety, store
+from . import consolidate, llm, mine, paths, replay as replay_mod, safety, store
 
 
 def _p(*a):
@@ -48,7 +48,9 @@ def cmd_sleep(a) -> int:
                                 min_interval_hours=a.min_interval,
                                 force=a.force, dry_run=a.dry_run)
     _p(json.dumps(rep, indent=2, sort_keys=True, default=str))
-    return 0 if rep.get("action") in ("ran", "skipped", "would-run") else 3
+    if rep.get("action") == "ran":
+        return 0 if rep.get("ok") is not False else 3
+    return 0 if rep.get("action") in ("skipped", "would-run") else 3
 
 
 def cmd_status(a) -> int:
@@ -175,14 +177,20 @@ def cmd_replay(a) -> int:
 
 
 def cmd_nightly(a) -> int:
-    """One unattended pass: gated consolidation, then a replay pass when it is due.
+    """One unattended pass: mine, then gated consolidation, then a replay pass when due.
+
+    Mining comes first and is not gated: it is deterministic text work, so a night when
+    the model is unreachable still banks what the person said twice. Consolidation and
+    replay stay behind their own gates.
 
     Report-only by construction. Nothing on this path reaches T2, so the worst an
     unattended night can do is spend its budget and leave a report for a person to
     read. Promotion stays a human act; automating it would let a bad memory become a
     standing instruction with nobody accountable.
     """
-    rep = {"ts": paths.now()}
+    rep: dict = {"ts": paths.now()}   # heterogeneous on purpose: three reports, one JSON
+    rep["mine"] = ({"skipped": "--no-mine"} if a.no_mine
+                   else mine.mine(min_sessions=a.mine_min_sessions, dry_run=a.dry_run))
     rep["sleep"] = consolidate.run_sleep(session=a.session, model=a.model,
                                          budget_usd=a.budget,
                                          min_records=a.min_records,
@@ -201,13 +209,34 @@ def cmd_nightly(a) -> int:
     return 0 if slept and not rep["replay"].get("failed") else 3
 
 
+def cmd_mine(a) -> int:
+    """Turn instructions the person repeated into T1 candidates + replay task proposals."""
+    rep = mine.mine(min_sessions=a.min_sessions, dry_run=a.dry_run)
+    _p(json.dumps(rep, indent=2, sort_keys=True))
+    return 0
+
+
+def _within_project(candidate_cwd: str, project: str) -> bool:
+    """Path-aware project containment; sibling prefixes are not descendants."""
+    if not project:
+        return True
+    if not candidate_cwd:
+        return False
+    candidate = os.path.realpath(os.path.abspath(candidate_cwd))
+    root = os.path.realpath(os.path.abspath(project))
+    try:
+        return os.path.commonpath([candidate, root]) == root
+    except ValueError:
+        return False
+
+
 def cmd_inject(a) -> int:
     """Print the provisional-memory block for a session's context. Framed as context."""
     recs = [safety.render_for_context({"text": c.get("_body", ""),
                                        "source": c.get("source"),
                                        "trust": c.get("trust")})
             for c in store.list_candidates(status="provisional", with_body=True)
-            if not a.project or c.get("cwd", "").startswith(a.project)]
+            if _within_project(c.get("cwd", ""), a.project)]
     if not recs:
         return 0
     _p("<provisional-memory unverified=\"true\">")
@@ -290,7 +319,8 @@ def main(argv=None) -> int:
     rp.add_argument("--tasks", default=replay_mod.DEFAULT_TASKS)
     rp.add_argument("--limit", type=int, default=3)
     rp.add_argument("--model", default=None)
-    rp.add_argument("--budget", type=float, default=0.50)
+    rp.add_argument("--budget", type=float, default=0.50,
+                    help="maximum USD across both A/B arms per task")
     rp.add_argument("--run", action="store_true")
     rp.set_defaults(fn=cmd_replay)
 
@@ -308,11 +338,25 @@ def main(argv=None) -> int:
                     help="hours between unattended replay passes (0 = every night)")
     nt.add_argument("--replay-limit", type=int, default=3, dest="replay_limit")
     nt.add_argument("--replay-budget", type=float, default=0.50, dest="replay_budget",
-                    help="per task across both arms, same meaning as replay --budget")
+                    help="maximum USD across both A/B arms per task")
     nt.add_argument("--replay-tasks", dest="replay_tasks",
                     default=replay_mod.DEFAULT_TASKS,
                     help="task file for the unattended replay pass")
+    nt.add_argument("--mine-min-sessions", type=int, default=mine.MIN_SESSIONS,
+                    dest="mine_min_sessions",
+                    help="how many separate sessions must repeat an instruction before "
+                         "it is mined as a preference")
+    nt.add_argument("--no-mine", action="store_true", dest="no_mine",
+                    help="skip the deterministic mine step")
     nt.set_defaults(fn=cmd_nightly)
+
+    mn = sub.add_parser("mine",
+                        help="find instructions repeated across sessions; emit T1 "
+                             "candidates + replay task proposals (no model)")
+    mn.add_argument("--min-sessions", type=int, default=mine.MIN_SESSIONS,
+                    dest="min_sessions")
+    mn.add_argument("--dry-run", action="store_true")
+    mn.set_defaults(fn=cmd_mine)
 
     ij = sub.add_parser("inject", help="print the provisional-memory context block")
     ij.add_argument("--project", default="")
@@ -320,7 +364,7 @@ def main(argv=None) -> int:
     ij.set_defaults(fn=cmd_inject)
 
     a = ap.parse_args(argv)
-    if hasattr(a, "model") and getattr(a, "model") is None:
-        a.model = llm.DEFAULT_MODEL
+    if hasattr(a, "model"):
+        a.model = llm.resolve_model(getattr(a, "model", None))
     paths.home()
     return a.fn(a)

@@ -362,6 +362,39 @@ including one record that names the memory it supersedes. That is the `context` 
 running on the author's own session, which is the path the earlier evidence could only assert from a log line in
 the pre-review build.
 
+**Model naming, measured the way launchd measures it.** Under `env -i` with only `HOME` and a `PATH` - the shape
+of a 03:41 job - `llm.resolve_model()` returned `qwen3.8-125b`, read from the `ANTHROPIC_MODEL` line of
+`~/.sleep/env`, and the argv handed to the CLI carried `--model qwen3.8-125b`. The call answered: `exit 0`,
+`is_error false`, `num_turns 1`, `total_cost_usd 0.005416`, result `17 × 23 equals 391.`, and the stream's own
+`init` event reported `model: qwen3.8-125b`. Before this change the name came from `SLEEP_MODEL` resolved at import
+time, so an unattended pass always named the built-in default and the operator's routing variable was silently
+overridden on every night. Pinned by `tests/test_cli.py::ModelNaming` (3 tests): the file's model reaches argv,
+`SLEEP_MODEL` beats the file, and a night with nothing configured still names a model rather than letting the CLI
+choose.
+
+**Mining, and the stamp it depends on.** `tests/test_cli.py::Mined` (10 tests) covers both halves: a report-back
+protocol captured with `--source user` lands as `inferred` with a `relayed` reason while a plain preference stays
+`user`; a directive inside relayed text loses the exemption and is quarantined; the role-addressed shape demotes
+only when `SENPI_RPC_HOST_INSTANCE_ID` is in the environment (measured: a delegated child session carries it, this
+interactive session carries no `SENPI_RPC_*` at all, and no `PARENT`/`TASK`/`CHILD`/`DELEGATE` marker exists in a
+child env, so there is nothing structural left to key on); repetition inside one session is not a pattern; two sessions in the same project produce one candidate and one proposal; the same words split across projects do not count; a second
+`mine` adds nothing; probe traffic is never mined; `--dry-run` writes nothing; and `nightly` still banks the mined
+sentence when the model refuses to answer (exit 3, one candidate in T1, nothing in T2).
+
+**One end-to-end pass with a real sentence, on this machine, in Turkish.** In a throwaway `SLEEP_HOME`, the same
+instruction was captured in three sessions (`rapor yazarken ölçmediğim bir şeyi çalışıyor gibi gösterme`), `mine` emitted one
+candidate (`c1793479780120b`) and one task proposal with `criteria_keywords` absent, and a hand-run `promote` moved
+it to T2 with the index line appended. That is the loop the request asked for - repeated sentence → suggestion →
+replay task candidate → T1 until a person promotes - carried through the real CLI, not a fixture. Cosmetic limit
+seen on the way: the id and the T2 filename are ASCII-folded, so a Turkish sentence slugifies to
+`rapor-yazarken-l-medi-im-...`; the store has always done that, and it is a name, not content.
+
+**The stamp's precision was measured against this machine's own archive, and one pattern was too loose.** The first
+sentinel rule (`print|say|output|return` followed by an uppercase token, anywhere) flagged 20 of the 34 `user`
+records and hit sentences that merely mention a constant. End-anchoring it - a probe ends with the token it wants
+back - dropped the count to 17 and, on a hand-built set, kept 6/6 probe phrasings flagged and 4/4 human phrasings
+clean, including `never return MEMORY.md as a raw string, parse it first`.
+
 ## Did not run
 
 - **Compaction triggered by size.** Three measurements, and none of them is a proof of the reprint path:
@@ -385,6 +418,22 @@ the pre-review build.
   samples, 22:16 above - and every row came back `tie: both missed`. The empty result is therefore measured,
   not missing: no `helped` and no `hurt` exists on this machine, and until at least one arm can meet a
   task's criteria the verdict column has nothing else to say.
+- **A mined preference on real data.** `sleepctl mine --dry-run` was run against this machine's entire T0 archive:
+  249 records (215 `agent`, 34 `user`), result `instructions: 0`. Of the 34 user records, 17 are prompts a program
+  wrote and the stamp now demotes; of the 15 distinct sentences left, not one was said verbatim in two different
+  sessions. So the mine is proven in a sandbox (10 tests) and proven *empty* against real history: it has not yet
+  produced a memory anyone uses, and cannot until a preference is actually repeated. The count is worth reading as
+  the shape of this archive rather than as a bug - a lot of tool traffic, a lot of one-off instructions, and no
+  measured repetition in it.
+- **A delegate brief typed at the parent.** The three task briefs this author dispatched by hand (`Read-only code
+  review. Repo: ...`, `Work in the git repo ...`, `Translate Turkish comments ...`) still carry `source=user` in the
+  buffer, because at the moment of capture the transport genuinely was a person typing at a terminal. The role-addressed
+  shape only demotes inside a host-spawned session, which is where that same text arrives as somebody else's first
+  prompt. Deliberate: the stamp guards the child's memory, not the parent's log.
+- **A model the CLI has never heard of.** The gateway model named in `~/.sleep/env` answers correctly (below), but
+  every call prints `[claude-code:unrecognized_model] {"model":"qwen3.8-125b","query_source":"sdk"}` on stderr while
+  its own `init` event reports that same model. A future reader of `nightly.log` will therefore see a warning line on
+  a pass that worked.
 - **Pi-side command hooks.** Layer 2b (the native extension) is the working Pi path and is the one that has been driven for real. The Claude-shaped entries in `~/.omo/agent/hooks.json` on this machine are dead configuration, and the pruning fix has since run against the real file: the 21:27 install removed the sleep `PostToolUse` object and left the `Write|Edit|MultiEdit` entry with both lint hooks inside it. What is still unproven on that file is `uninstall`, which has only ever been driven in a sandbox.
 - **arXiv:2606.03979 is sourced, not confirmed.** Re-fetched the Google Research post on 2026-10-31: its body
   links `arxiv.org/pdf/2606.03979` and the Acknowledgements credit Ali Behrouz (Google and Cornell), Farnoosh
@@ -393,3 +442,28 @@ the pre-review build.
   local permission system (rule `*`), so the ID's existence on arXiv rests on the blog's own word, and the
   number's format (2606 = June 2026) was flagged as odd in a note when it was first copied. Cite it as "the
   paper the Google Research post links", not as an independently checked reference.
+
+## 2026-11-01: real-model Caligo A/B replay
+
+A clean `SLEEP_HOME` received three private facts about a fictional Project Caligo gateway. A real
+`anthropic/claude-haiku-4-5` consolidation call accepted one T1 candidate, consumed all three T0
+records, and archived the buffer. The candidate preserved the exact header, value, and file:
+`X-Caligo-Route: violet-heron-731` in `routes.toml`. Injection returned that candidate only for the
+project cwd recorded in the T0 evidence. Nothing was promoted to T2.
+
+The same question then ran in both replay arms:
+
+| condition | answer evidence | criteria | turns | cost |
+|---|---|---|---:|---:|
+| memory off | model said it could not identify the header, value, or file | miss | 3 | $0.003779 |
+| memory on | named `X-Caligo-Route`, `violet-heron-731`, and `routes.toml` | met | 3 | $0.007461 |
+
+The replay reported `treatment delivered: yes`, verdict `helped`, and answer drift `0.62`. Total
+measured replay cost was `$0.01124`. This is one controlled result, not a general claim that every
+candidate helps.
+
+The first paid consolidation also exposed a parser defect: the model emitted a valid proposal and
+used `===PROPOSAL===` only as a closing marker. The parser discarded everything before the first
+marker. `sleepkit.consolidate.split_blocks()` now preserves a leading contract-shaped proposal while
+still discarding ordinary preamble, pinned by
+`test_closing_proposal_marker_preserves_leading_proposal`.

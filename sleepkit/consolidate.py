@@ -44,16 +44,55 @@ PROPOSAL_SEP = "===PROPOSAL==="
 MIN_BODY = 30
 
 
-def distill(session: str | None = None, model: str = llm.DEFAULT_MODEL,
+def buffer_projects(records: list) -> list[str]:
+    """Canonical project addresses present in one consolidation batch."""
+    projects = set()
+    for rec in records:
+        cwd = (rec.get("cwd") or "").strip()
+        if cwd and os.path.abspath(cwd) != os.path.sep:
+            projects.add(os.path.realpath(os.path.abspath(cwd)))
+    return sorted(projects)
+
+
+def buffer_cwd(records: list) -> str:
+    """The only project represented by a batch, or empty when mixed/unknown.
+
+    Canonical paths decide whether the batch is mixed, but the recorded spelling is
+    preserved. On macOS, realpath adds a `/private` prefix to temporary directories;
+    rewriting that address would make an otherwise matching project unreachable.
+    """
+    addresses = []
+    for rec in records:
+        cwd = (rec.get("cwd") or "").strip()
+        if cwd and os.path.abspath(cwd) != os.path.sep:
+            addresses.append((os.path.normpath(os.path.abspath(cwd)),
+                              os.path.realpath(os.path.abspath(cwd))))
+    if len({canonical for _original, canonical in addresses}) != 1:
+        return ""
+    return addresses[0][0] if addresses else ""
+
+
+def distill(session: str | None = None, model: str | None = None,
             budget: float = 0.5, prompt_file: str | None = None,
             dry_run: bool = False) -> dict:
+    model = llm.resolve_model(model)
     recs = store.read_buffer(session)
     if not recs:
         return {"ok": True, "reason": "buffer empty", "proposals": 0, "accepted": 0,
                 "consumed": False}
+    projects = buffer_projects(recs)
+    if len(projects) > 1:
+        return {"ok": False, "reason": "mixed-project buffer; consolidate one session at a time",
+                "projects": projects, "buffer_records": len(recs), "proposals": 0,
+                "accepted": 0, "refused": [], "accepted_ids": [], "llm_exit": None,
+                "consumed": False}
     if dry_run:
         return {"ok": True, "dry_run": True, "buffer_records": len(recs),
                 "would_send": _fmt_buffer(recs)[:2000]}
+    # One address for the whole batch, taken from the observations and not from this
+    # process: filing a candidate at the consolidator's own cwd files it where no
+    # session that produced it will ever look. See buffer_cwd().
+    origin = buffer_cwd(recs)
     pf = prompt_file or os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                                      "prompts", "consolidate.md")
     user = (
@@ -69,14 +108,14 @@ def distill(session: str | None = None, model: str = llm.DEFAULT_MODEL,
                   allowed_tools="Read", model=model, budget_usd=budget)
     _blocks, how = split_blocks(res["stdout"] or "")
     ing = ingest_records(parse_stdout(res["stdout"] or ""), session=session or "",
-                         cwd=os.getcwd())
+                         cwd=origin)
     ing["parse"] = {"mode": how, "blocks": len(_blocks)}
     if res["exit"] == 0 and not ing["proposals"] and how == "none":
         # The model answered and nothing in the answer matched the contract. Say so:
         # an empty night and a swallowed night are indistinguishable from the outside,
         # and only one of them is worth reading the log for.
         ing["warn"] = "the model answered, but no block matched the proposal contract"
-    files = ingest_pending(session=session or "")
+    files = ingest_pending(session=session or "", cwd=origin)
     ing["proposals"] += files["proposals"]
     ing["accepted"] += files["accepted"]
     ing["refused"] += files["refused"]
@@ -128,7 +167,15 @@ def split_blocks(text: str) -> tuple:
     """
     text = text or ""
     if _SEP_LINE.search(text):
-        return [b for b in re.split(_SEP_LINE, text)[1:] if b.strip()], "marker"
+        parts = re.split(_SEP_LINE, text)
+        blocks = [b for b in parts[1:] if b.strip()]
+        # Some models use the marker as a closing fence only. Keep a leading
+        # contract-shaped proposal, but still discard ordinary preamble.
+        leading = parts[0]
+        first_header = _HDR_LINE.search(leading)
+        if first_header:
+            blocks.insert(0, leading[first_header.start():])
+        return blocks, "marker"
 
     lines = text.split("\n")
     hdr = [bool(_HDR_LINE.match(line)) for line in lines]
@@ -186,14 +233,21 @@ def parse_stdout(text: str) -> list:
     return out
 
 
-def ingest_records(parsed: list, session: str = "", cwd: str = "") -> dict:
-    """Run proposals through the gates. Policy lives here, not in the prompt."""
+def ingest_records(parsed: list, session: str = "", cwd: str = "",
+                   honor_provenance: bool = False) -> dict:
+    """Run proposals through the gates. Model text cannot assign its own provenance.
+
+    The default is the stdout channel, so Python stamps every proposal agent/observed.
+    Only ingest_pending(), the explicit hand-authored file channel, may honor source and
+    trust headers. Policy lives here rather than in a prompt a model can rewrite.
+    """
     accepted, refused = [], []
     for item in parsed:
         f = item["fields"]
+        source = f.get("source", "agent") if honor_provenance else "agent"
+        trust = f.get("trust", "observed") if honor_provenance else "observed"
         ok, out = store.add_candidate(
-            item["body"], kind=f.get("kind", "fact"), source=f.get("source", "agent"),
-            trust=f.get("trust", "observed"),
+            item["body"], kind=f.get("kind", "fact"), source=source, trust=trust,
             session=session or os.environ.get("SLEEP_SESSION", ""),
             cwd=cwd or os.getcwd(),
             evidence=[x for x in f.get("evidence", "").split(",") if x])
@@ -218,7 +272,7 @@ def ingest_pending(session: str = "", cwd: str = "") -> dict:
         item = parse_proposal(raw)
         item["file"] = name
         parsed.append(item)
-    result = ingest_records(parsed, session=session, cwd=cwd)
+    result = ingest_records(parsed, session=session, cwd=cwd, honor_provenance=True)
     for item, name in [(i, i["file"]) for i in parsed]:
         try:
             shutil.move(os.path.join(d, name),

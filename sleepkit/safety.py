@@ -14,6 +14,7 @@ This is a filter, not a sandbox. It is deliberately boring and reviewable.
 """
 from __future__ import annotations
 
+import os
 import re
 
 SOURCES = ("user", "agent", "inferred")
@@ -93,6 +94,79 @@ def quarantine_reason(text: str, source: str) -> str | None:
         return "text sourced from untrusted content, not from the user"
     if _DIRECTIVE_SHAPE.search(text or "") and source != "user":
         return "directive-shaped text with provenance '%s' (needs source=user)" % source
+    return None
+
+
+# -------------------------------------------------------- machine relay -----
+# A prompt is not always the person typing it. A delegate's task brief, a background
+# notification body and a one-shot CLI probe all arrive as "the user's first message":
+# on the Claude side the UserPromptSubmit hook fires inside the sub-agent's own session,
+# and on the Pi side a `pi -p` call hands its argument in as typed text. hookio.provenance()
+# already demotes what the transport labels (rpc/extension delivery); this catches the rest.
+#
+# Relayed text must not be mistaken for the person's words. It loses the source=user
+# exemption in quarantine_reason(), so "never write em-dashes" inside a delegate brief
+# cannot become a standing rule, and sleepkit.mine cannot read a batch of probes as a
+# preference the human repeated on purpose.
+_MACHINE_ENV = ("SENPI_RPC_HOST_INSTANCE_ID", "SENPI_RPC_HOST_DAEMON_DIR",
+                "CLAUDE_AGENT_SDK_CLIENT_APP", "CODEX_CI")
+
+# A report-back protocol. Only a program tells a model which sentinel to print, how many
+# words to print, or that a reply is the end of a job, so these mark a relay on their own.
+_RELAY_STRONG = [
+    (re.compile(r"(?i)\b(?:then|and then) reply\b"), "report-back protocol ('then reply')"),
+    (re.compile(r"(?i)\breply (?:only|exactly|with exactly|with the (?:single|one) word)\b"),
+     "forced output sentinel"),
+    # End-anchored on purpose. Measured against this machine's own T0 archive: an
+    # unanchored version flagged genuine instructions that merely mention a constant
+    # ("never return MEMORY.md"), while a probe always ends with the token it wants back.
+    (re.compile(r"(?i)\b(?:print|say|echo|output|reply(?:\s+with)?)\s+"
+                r"(?:[A-Z][A-Z0-9_]{3,}|[A-Z0-9_]{3,}(?:OK|DONE|READY|PONG))"
+                r"\s*[.!?]?\s*$"),
+     "sentinel token to print"),
+    (re.compile(r"(?i)\b(acp_delegate|task_summary|runId|<task-id>|background-task-notification|"
+                r"sub-?agent|delegate (?:run|session))\b"), "delegate plumbing"),
+    (re.compile(r"(?i)^\s*run (?:exactly )?(?:one|a|these) (?:bash|shell|python|eval) "
+                r"(?:command|cell|commands|cells)\b"), "single-command probe"),
+    (re.compile(r"(?i)\bdo not (?:read|write|edit|touch) any (?:other )?file\b|"
+                r"\bdo not run any other command\b"), "sandboxed-task phrasing"),
+]
+
+# Phrasing a person genuinely uses with their own tool, so it only counts as a relay when
+# the session itself is machine-driven. A false positive here costs one reversible demotion
+# (the sentence is still captured, still becomes a candidate, and can be re-recorded by
+# hand); a false negative makes a machine instruction a rule in every later session.
+_RELAY_WEAK = [
+    (re.compile(r"(?i)^\s*(?:you are (?:a|an|the)\b|your (?:task|job|role) is to\b|task:|"
+                r"read-only code review\.|work in the git repo\b)"), "addressed to a role"),
+]
+
+
+def machine_driven(environ: dict | None = None) -> str:
+    """Name of an env marker proving this session was spawned by a host, else "".
+
+    Observed 2026-10-31: a delegated child session carried SENPI_RPC_HOST_INSTANCE_ID and
+    an interactive terminal session carried no SENPI_RPC_* at all. capture() treats this
+    transport marker as decisive provenance; relay_reason() still uses it to explain weak
+    role-addressed shapes when called on archived records that predate the stamp.
+    """
+    env = os.environ if environ is None else environ
+    for name in _MACHINE_ENV:
+        if env.get(name):
+            return name
+    return ""
+
+
+def relay_reason(text: str, environ: dict | None = None) -> str | None:
+    """Why this text looks written by a program for a model, or None."""
+    t = text or ""
+    for pat, why in _RELAY_STRONG:
+        if pat.search(t):
+            return why
+    if machine_driven(environ):
+        for pat, why in _RELAY_WEAK:
+            if pat.search(t):
+                return why + " in a machine-driven session"
     return None
 
 

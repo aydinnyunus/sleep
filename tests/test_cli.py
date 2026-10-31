@@ -126,7 +126,8 @@ class Sandbox(unittest.TestCase):
         for leaked in ("SLEEP_DISABLE", "SLEEP_SYNC", "SLEEPCTL", "SLEEP_MIN_RECORDS",
                        "SLEEP_MIN_INTERVAL", "SLEEP_MODEL", "SLEEP_SESSION",
                        "SLEEP_MEMORY_DIR", "SLEEP_HOME", "SLEEP_TEST_MODEL_MARKER",
-                       "CLAUDE_HOME", "OMO_HOME", "CLAUDE_CONFIG_DIR", "CLAUDE_BIN"):
+                       "CLAUDE_HOME", "OMO_HOME", "CLAUDE_CONFIG_DIR", "CLAUDE_BIN",
+                       "ANTHROPIC_MODEL", "SENPI_RPC_HOST_INSTANCE_ID"):
             env.pop(leaked, None)
         env.update({
             "HOME": self.home,
@@ -413,6 +414,12 @@ class StatusShowInject(Sandbox):
         self.assertIn("</provisional-memory>", got.stdout)
         self.assertIn("read_api", got.stdout)
         self.assertNotIn("Mars dashboards", got.stdout)
+
+    def test_inject_rejects_sibling_path_prefix_collision(self):
+        sibling = self.proj_a + "-evil"
+        self.seed_candidate("csibling", "Sibling project memory must stay isolated.", cwd=sibling)
+        got = self.cli("inject", "--project", self.proj_a)
+        self.assertNotIn("Sibling project memory", got.stdout)
 
     def test_inject_without_a_project_returns_every_provisional_record(self):
         self.seed_pool()
@@ -989,6 +996,28 @@ print(json.dumps({"type": "result", "num_turns": 1, "total_cost_usd": 0.01,
                   "result": "Nothing worth carrying forward. The session was routine."}))
 """
 
+FAKE_CLAUDE_PROPOSAL = """#!/usr/bin/env python3
+import os, sys
+sys.stdin.read()
+print("===PROPOSAL===")
+print("source: user")
+print("kind: preference")
+print("trust: verified")
+print()
+print(os.environ["SLEEP_FAKE_PROPOSAL"])
+"""
+
+
+FAKE_CLAUDE_ARGV = """#!/usr/bin/env python3
+import json, os, sys
+sys.stdin.read()
+with open(os.environ["SLEEP_FAKE_ARGV"], "a", encoding="utf-8") as fh:
+    fh.write(" ".join(sys.argv[1:]) + "\\n")
+print(json.dumps({"type": "result", "num_turns": 1, "total_cost_usd": 0.01,
+                  "duration_ms": 5, "session_id": "fake",
+                  "result": "Nothing worth carrying forward. The session was routine."}))
+"""
+
 
 class Unattended(Sandbox):
     """The replay and nightly path, driven the way launchd drives it.
@@ -1008,9 +1037,9 @@ class Unattended(Sandbox):
         return os.path.join(self.bin, "fake-claude")
 
     def tasks_file(self, measurable=True):
-        task = {"id": "idle-timeout",
-                "prompt": "Our long streaming calls die at 500 seconds. Why?",
-                "criteria": "Names the ALB idle timeout as the cause."}
+        task: dict = {"id": "idle-timeout",
+                      "prompt": "Our long streaming calls die at 500 seconds. Why?",
+                      "criteria": "Names the ALB idle timeout as the cause."}
         if measurable:
             task["criteria_keywords"] = [["idle timeout", "idle_timeout"],
                                          ["alb", "load balancer"]]
@@ -1165,6 +1194,80 @@ class Unattended(Sandbox):
                          "a failed pass must not consume the interval")
 
 
+class ProjectAttribution(Sandbox):
+    """Which project a candidate belongs to, decided by the observation.
+
+    The unattended pass runs from $HOME. While the consolidator asked its own process
+    for the cwd, every candidate it accepted was filed under $HOME, and `inject
+    --project <repo>`, which is what the extension asks for, could never reach one: an
+    accepted memory that no session would ever read. So the test captures in one
+    directory and consolidates from another, which is the real shape of a night.
+    """
+
+    BODY = "Prefer the rtk proxy form when a command needs raw passthrough output."
+
+    def proposal_claude(self):
+        self._make_script("fake-claude-proposal", FAKE_CLAUDE_PROPOSAL)
+        return os.path.join(self.bin, "fake-claude-proposal")
+
+    def test_a_candidate_lands_in_the_project_its_records_came_from(self):
+        for text in ("the ALB idle timeout is 300s on this service",
+                     "the Routify stream holds 500s and gets cut"):
+            got = self.cli("capture", "--text", text, "--source", "user",
+                           "--cwd", self.proj_a, "--session", "attr")
+            self.assertEqual(got.returncode, 0, got.stdout + got.stderr)
+        ran = self.cli("sleep", "--min-records", "2", "--min-interval", "0",
+                       cwd=self.home, CLAUDE_BIN=self.proposal_claude(),
+                       SLEEP_FAKE_PROPOSAL=self.BODY)
+        doc = json.loads(ran.stdout)
+        self.assertEqual(doc["action"], "ran", doc)
+        self.assertEqual(doc["accepted"], 1, doc)
+        on_disk = self.read(os.path.join(self.sleep_home, "candidates",
+                                         doc["accepted_ids"][0] + ".md"))
+        self.assertIn("\ncwd: %s\n" % self.proj_a, on_disk,
+                      "the tag must be the observed project, not the consolidator's cwd")
+        self.assertIn("rtk proxy",
+                      self.cli("inject", "--project", self.proj_a, cwd=self.home).stdout)
+        self.assertNotIn("rtk proxy", self.cli("inject", "--project", self.proj_b,
+                                               cwd=self.home).stdout)
+
+    def test_a_mixed_project_batch_fails_closed(self):
+        self.cli("capture", "--text", "Project A private routing fact.", "--source", "user",
+                 "--cwd", self.proj_a, "--session", "mixed-a")
+        self.cli("capture", "--text", "Project B private routing fact.", "--source", "user",
+                 "--cwd", self.proj_b, "--session", "mixed-b")
+        ran = self.cli("sleep", "--min-records", "2", "--min-interval", "0",
+                       cwd=self.home, CLAUDE_BIN=self.proposal_claude(),
+                       SLEEP_FAKE_PROPOSAL=self.BODY)
+        self.assertEqual(ran.returncode, 3, ran.stdout + ran.stderr)
+        doc = json.loads(ran.stdout)
+        self.assertFalse(doc["ok"])
+        self.assertIn("mixed-project buffer", doc["reason"])
+        self.assertEqual(len(self.buffer_records()), 2)
+        self.assertEqual(os.listdir(os.path.join(self.sleep_home, "candidates")), [])
+
+    def test_a_hand_dropped_proposal_follows_the_batch_that_ingested_it(self):
+        # pending/ carries no observation of its own, so it has no say. The pass that
+        # reads it is consolidating one project's buffer, so the file is filed with
+        # that batch instead of being left at the consolidator's own directory.
+        for text in ("observed one", "observed two"):
+            got = self.cli("capture", "--text", text, "--source", "user",
+                           "--cwd", self.proj_a, "--session", "attr2")
+            self.assertEqual(got.returncode, 0, got.stdout + got.stderr)
+        self.write(os.path.join(self.sleep_home, "pending", "01.txt"),
+                   "source: user\ntrust: verified\n\n"
+                   "The staging box needs the 90s curl timeout on the internal proxy.\n")
+        ran = self.cli("sleep", "--min-records", "2", "--min-interval", "0",
+                       cwd=self.home, CLAUDE_BIN=self.proposal_claude(),
+                       SLEEP_FAKE_PROPOSAL=self.BODY)
+        doc = json.loads(ran.stdout)
+        self.assertEqual(doc["accepted"], 2, doc)
+        pending_row = [c for c in self.read(os.path.join(
+            self.sleep_home, "candidates", doc["accepted_ids"][-1] + ".md")).splitlines()
+            if c.startswith("cwd: ")]
+        self.assertEqual(pending_row, ["cwd: %s" % self.proj_a])
+
+
 class NightlyJob(Sandbox):
     """The launchd step, tested as the shape of a job that runs with nobody watching.
 
@@ -1217,6 +1320,204 @@ class NightlyJob(Sandbox):
         self.assertIn("REFUSED", got.stdout, got.stdout[-800:])
         self.assertNotIn("rendered and linted", got.stdout,
                          "a plist that fails the strict lint must not reach launchctl")
+
+class Mined(Sandbox):
+    """Layer 2.5: what the person said twice, and what only looked like the person.
+
+    Both halves of the same problem: the mine has to find real repetition in an archive
+    that is mostly probe traffic, so the stamp that marks a machine-written prompt has to
+    work before the mine can trust a `source=user` label.
+    """
+
+    PREF = "when you review my code, point out the risk before the style note"
+    PROBE = "Run exactly one bash command: hostname. Then reply with exactly one word: READY"
+
+    def say(self, text, session, cwd=None, **env):
+        return self.cli("capture", text, "--source", "user", "--session", session,
+                        "--cwd", cwd or self.proj_a, **env)
+
+    def env_file(self, text):
+        return self.write(os.path.join(self.sleep_home, "env"), text)
+    def silent_claude(self):
+        """A claude that fails the way an unauthenticated launchd run fails."""
+        self._make_script("fake-claude-silent", FAKE_CLAUDE_SILENT)
+        return os.path.join(self.bin, "fake-claude-silent")
+
+    # ------------------------------------------------------------- the stamp --
+    def test_a_report_back_protocol_is_not_recorded_as_the_users_words(self):
+        # Measured on this laptop: the T0 buffer held "Reply PONG", "Run exactly one
+        # python cell: print(6*7)" and a delegate's whole task brief as source=user,
+        # because a probe and a sub-agent's brief both arrive as a typed first prompt.
+        self.assertTrue(self.say(self.PROBE, "s-probe").returncode == 0)
+        rec = self.buffer_records()[0]
+        self.assertEqual(rec["source"], "inferred")
+        self.assertIn("report-back", rec["relayed"])
+        self.assertTrue(self.say(self.PREF, "s-real").returncode == 0)
+        real = [r for r in self.buffer_records() if r["text"] == self.PREF][0]
+        self.assertEqual(real["source"], "user")
+        self.assertNotIn("relayed", real)
+
+    def test_a_directive_inside_relayed_text_loses_its_exemption(self):
+        # Only source=user may carry a directive. A delegate brief that says so is a
+        # program instructing the agent, which is the case quarantine exists for.
+        got = self.say("Never write em-dashes in reports. Then reply READY.", "s-brief")
+        self.assertEqual(self.buffer_records(), [], got.stdout + got.stderr)
+        reasons = [q["reason"] for q in self.quarantined()]
+        self.assertEqual(len(reasons), 1, reasons)
+        self.assertIn("directive-shaped", reasons[0])
+
+    def test_a_host_spawned_session_demotes_role_addressed_text(self):
+        # Phrasing a person also uses, so it only counts when the session itself was
+        # spawned by a host: an RPC child carries the marker, a terminal does not.
+        weak = "Work in the git repo /tmp/whatever and fix the flaky test."
+        self.say(weak, "s-machine", SENPI_RPC_HOST_INSTANCE_ID="gen-7")
+        rec = self.buffer_records()[0]
+        self.assertEqual(rec["source"], "inferred")
+        self.assertIn("machine-driven", rec["relayed"])
+        self.say(weak, "s-terminal")
+        typed = [r for r in self.buffer_records() if r["session"] == "s-terminal"][0]
+        self.assertEqual(typed["source"], "user")
+
+    def test_any_host_spawned_prompt_loses_user_provenance(self):
+        plain = "Inspect these files and report correctness findings."
+        self.say(plain, "s-machine-plain", SENPI_RPC_HOST_INSTANCE_ID="gen-8")
+        rec = self.buffer_records()[0]
+        self.assertEqual(rec["source"], "inferred")
+        self.assertIn("machine-driven session", rec["relayed"])
+
+    # -------------------------------------------------------------- the mine --
+    def test_repetition_inside_one_session_is_not_a_pattern(self):
+        self.say(self.PREF, "s-one")
+        self.say(self.PREF, "s-one")
+        got = self.cli("mine", "--dry-run")
+        self.assertEqual(got.returncode, 0, got.stdout + got.stderr)
+        self.assertEqual(json.loads(got.stdout)["instructions"], 0, got.stdout)
+
+    def test_a_repeated_instruction_becomes_a_candidate_the_project_sees(self):
+        self.say(self.PREF, "s-one")
+        self.say(self.PREF, "s-two", cwd=self.proj_b)
+        self.say(self.PREF, "s-three")
+        got = self.cli("mine")
+        rep = json.loads(got.stdout)
+        self.assertEqual(got.returncode, 0, got.stdout + got.stderr)
+        self.assertEqual(rep["instructions"], 1, got.stdout)
+        self.assertEqual(len(rep["emitted"]), 1, got.stdout)
+        listed = self.cli("inject", "--project", self.proj_a).stdout
+        self.assertIn(self.PREF, listed)
+        self.assertNotIn(self.PREF, self.cli("inject", "--project", self.proj_b).stdout,
+                         "said in two projects, most often in A: it stays attributed to A")
+        tasks = self.read_json(os.path.join(self.sleep_home, "replay",
+                                            "task-proposals.json"))["tasks"]
+        self.assertEqual(len(tasks), 1)
+        self.assertNotIn("criteria_keywords", tasks[0],
+                         "a proposed task must not grade itself; keywords are a human add")
+        self.assertIn(self.PREF, tasks[0]["prompt"])
+
+    def test_same_words_once_in_two_projects_are_not_a_pattern(self):
+        self.say(self.PREF, "s-a", cwd=self.proj_a)
+        self.say(self.PREF, "s-b", cwd=self.proj_b)
+        rep = json.loads(self.cli("mine", "--dry-run").stdout)
+        self.assertEqual(rep["instructions"], 0, json.dumps(rep, indent=2))
+
+    def test_mining_twice_adds_nothing_new(self):
+        self.say(self.PREF, "s-one")
+        self.say(self.PREF, "s-two")
+        first = json.loads(self.cli("mine").stdout)
+        second = json.loads(self.cli("mine").stdout)
+        self.assertEqual(len(first["emitted"]), 1)
+        self.assertEqual(second["emitted"], [], json.dumps(second, indent=2))
+        self.assertEqual(len(second["already_there"]), 1, json.dumps(second, indent=2))
+
+    def test_probe_traffic_is_never_mined(self):
+        self.say(self.PROBE, "s-probe-1")
+        self.say(self.PROBE, "s-probe-2")
+        rep = json.loads(self.cli("mine", "--dry-run").stdout)
+        self.assertEqual(rep["instructions"], 0, json.dumps(rep, indent=2))
+
+    def test_dry_run_writes_nothing(self):
+        self.say(self.PREF, "s-one")
+        self.say(self.PREF, "s-two")
+        before = self.tree_state(os.path.join(self.sleep_home, "candidates"))
+        rep = json.loads(self.cli("mine", "--dry-run").stdout)
+        self.assertEqual(rep["instructions"], 1)
+        self.assertEqual(self.tree_state(os.path.join(self.sleep_home, "candidates")),
+                         before, "dry-run must leave T1 alone")
+        self.assertFalse(os.path.exists(os.path.join(self.sleep_home, "replay",
+                                                     "task-proposals.json")))
+
+    def test_the_nightly_mines_even_when_the_model_refuses_to_answer(self):
+        # The point of putting mining before the gated pass: on this machine every
+        # unattended night so far failed auth, and a night that spends itself talking to
+        # nobody should still bank what the person actually repeated.
+        self.say(self.PREF, "s-one")
+        self.say(self.PREF, "s-two")
+        got = self.cli("nightly", "--force", "--replay-interval", "0",
+                       CLAUDE_BIN=self.silent_claude())
+        self.assertEqual(got.returncode, 3, got.stdout + got.stderr)
+        rep = json.loads(got.stdout)
+        self.assertEqual(len(rep["mine"]["emitted"]), 1, got.stdout)
+        self.assertIn(self.PREF, self.cli("inject", "--project", self.proj_a).stdout)
+        in_t2 = [n for n in os.listdir(self.memory) if n.endswith(".md")
+                 and self.PREF in self.read(os.path.join(self.memory, n))]
+        self.assertEqual(in_t2, [], "mining stays in T1: promotion is a human act")
+
+    def test_no_mine_leaves_t1_alone(self):
+        self.say(self.PREF, "s-one")
+        self.say(self.PREF, "s-two")
+        got = self.cli("nightly", "--force", "--no-mine", "--dry-run")
+        self.assertEqual(got.returncode, 0, got.stdout + got.stderr)
+        self.assertEqual(json.loads(got.stdout)["mine"], {"skipped": "--no-mine"})
+        self.assertEqual(self.buffer_records()[0]["text"], self.PREF)
+
+
+class ModelNaming(Sandbox):
+    """Where the model name of an unattended pass comes from.
+
+    Measured on this laptop: every launchd sample exited 1 on "Not logged in", and the
+    job's env carries no model at all. The code resolved the default once, at import,
+    from a variable launchd never sets, so the model the operator routed through the
+    gateway in ~/.sleep/env was overridden by a built-in name on every night. These pin
+    the reading order, because a wrong model is indistinguishable from a quiet night.
+    """
+
+    def argv_claude(self):
+        self._make_script("fake-claude-argv", FAKE_CLAUDE_ARGV)
+        return os.path.join(self.bin, "fake-claude-argv")
+
+    def consolidate(self, **env):
+        for n, text in enumerate(("the ALB idle timeout is 300s on this service",
+                                  "the Routify stream holds 500s and gets cut")):
+            got = self.cli("capture", "--text", text, "--source", "user",
+                           "--cwd", self.proj_a, "--session", "naming-%d" % n)
+            self.assertEqual(got.returncode, 0, got.stdout + got.stderr)
+        log = self.at("model-argv.log")
+        ran = self.cli("sleep", "--min-records", "2", "--min-interval", "0",
+                       cwd=self.home, CLAUDE_BIN=self.argv_claude(),
+                       SLEEP_FAKE_ARGV=log, **env)
+        self.assertEqual(ran.returncode, 0, ran.stdout + ran.stderr)
+        self.assertEqual(json.loads(ran.stdout)["action"], "ran", ran.stdout)
+        self.assertTrue(os.path.exists(log), "the pass never reached a model call")
+        return self.read(log)
+
+    def test_the_model_named_in_the_env_file_is_the_model_on_argv(self):
+        self.write(os.path.join(self.sleep_home, "env"),
+                   "# the gateway this laptop routes through\n"
+                   "ANTHROPIC_BASE_URL=https://gateway.invalid/v1\n"
+                   "ANTHROPIC_MODEL=qwen3.8-125b\n")
+        log = self.consolidate()
+        self.assertIn("--model qwen3.8-125b", log, log)
+        self.assertNotIn("claude-haiku", log, "the built-in default must not win here")
+
+    def test_an_explicit_model_beats_the_file(self):
+        self.write(os.path.join(self.sleep_home, "env"), "ANTHROPIC_MODEL=qwen3.8-125b\n")
+        log = self.consolidate(SLEEP_MODEL="someone-elses/pick")
+        self.assertIn("--model someone-elses/pick", log, log)
+
+    def test_a_night_with_nothing_configured_still_names_a_model(self):
+        # The contract is that argv always carries a name: leaving the choice to the CLI
+        # would let whatever the operator's shell defaults to become the nightly model.
+        log = self.consolidate()
+        self.assertIn("--model anthropic/claude-haiku-4-5", log, log)
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -13,8 +13,6 @@ from __future__ import annotations
 import difflib
 import json
 import os
-import re
-import shutil
 import time
 
 from . import llm, paths, safety
@@ -188,7 +186,8 @@ def metrics_from_result(raw) -> dict:
         if isinstance(item, dict) and any(k in item for k in
                                            ("num_turns", "total_cost_usd", "usage")):
             best = item
-    usage = best.get("usage") if isinstance(best.get("usage"), dict) else {}
+    raw_usage = best.get("usage")
+    usage = raw_usage if isinstance(raw_usage, dict) else {}
     cost = best.get("total_cost_usd", best.get("cost_usd"))
     if cost is None:
         cost = usage.get("total_cost_usd")
@@ -226,16 +225,18 @@ def run_task(task: dict, condition: str, memory_text: str, model: str,
     return metrics
 
 
-def run_suite(tasks_path: str = DEFAULT_TASKS, limit: int = 3, model: str = llm.DEFAULT_MODEL,
+def run_suite(tasks_path: str = DEFAULT_TASKS, limit: int = 3, model: str | None = None,
               budget: float = 0.50, timeout_s: int = 600) -> dict:
+    model = llm.resolve_model(model)
     tasks = [t for t in load_tasks(tasks_path) if "skipped" not in t][:limit]
     skipped = [t for t in load_tasks(tasks_path) if "skipped" in t]
     memory_text = _context_block("")
     treatment = bool(memory_text.strip())
     rows = []
+    arm_budget = budget / 2.0
     for t in tasks:
-        off = run_task(t, "off", "", model, budget, timeout_s)
-        on = run_task(t, "on", memory_text, model, budget, timeout_s)
+        off = run_task(t, "off", "", model, arm_budget, timeout_s)
+        on = run_task(t, "on", memory_text, model, arm_budget, timeout_s)
         delta = {}
         for k in ("num_turns", "total_cost_usd", "duration_ms"):
             a, b = off.get(k), on.get(k)
@@ -289,7 +290,7 @@ def mark_replayed() -> str:
     return ts
 
 
-def nightly(tasks_path: str = DEFAULT_TASKS, model: str = None, budget: float = 0.50,
+def nightly(tasks_path: str = DEFAULT_TASKS, model: str | None = None, budget: float = 0.50,
             limit: int = 3, interval_hours: float = 168.0,
             dry_run: bool = False) -> dict:
     """The replay half of an unattended night: run when due, report, never promote.

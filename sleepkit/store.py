@@ -11,7 +11,6 @@ Policy (the part that keeps this from becoming a self-poisoning loop):
 """
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 import re
@@ -85,6 +84,13 @@ def capture(text: str, kind: str = "fact", source: str = "agent", session: str =
     if kind not in KINDS:
         return False, "unknown kind %r" % kind
     red, was_red = safety.redact(text)
+    relay = safety.relay_reason(red) if source == "user" else None
+    machine = safety.machine_driven() if source == "user" else ""
+    if relay or machine:
+        # A host-spawned session is machine-authored even when its wording looks human.
+        # It loses the user exemption and mine() will not count it as a preference.
+        relay = relay or "machine-driven session (%s)" % machine
+        source = "inferred"
     reason = safety.quarantine_reason(red, source)
     rec = {
         "id": paths.new_id("b"),
@@ -98,6 +104,8 @@ def capture(text: str, kind: str = "fact", source: str = "agent", session: str =
         "redacted": "true" if was_red else "false",
         "text": red,
     }
+    if relay:
+        rec["relayed"] = relay
     if reason:
         rec["reason"] = reason
         with open(os.path.join(paths.quarantine_dir(), rec["id"] + ".json"), "w",
@@ -171,6 +179,9 @@ def add_candidate(text: str, kind: str = "fact", source: str = "agent",
     if not text:
         return False, "empty"
     red, was_red = safety.redact(text)
+    relay = safety.relay_reason(red) if source == "user" else None
+    if relay:
+        source = "inferred"
     reason = safety.quarantine_reason(red, source)
     if reason:
         rec = {"id": paths.new_id("q"), "ts": paths.now(), "reason": reason,

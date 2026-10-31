@@ -18,7 +18,13 @@ import subprocess
 
 from . import paths
 
-DEFAULT_MODEL = os.environ.get("SLEEP_MODEL", "anthropic/claude-haiku-4-5")
+FALLBACK_MODEL = "anthropic/claude-haiku-4-5"
+# DEFAULT_MODEL stays a name because callers pass it as "no opinion", but it is a plain
+# literal now. SLEEP_MODEL and the ANTHROPIC_MODEL line in ~/.sleep/env both beat it, and
+# they are read per call: the nightly gets a launchd env with no model in it at all, so
+# whatever this process imported at start is not necessarily what the endpoint on disk
+# is routed to.
+DEFAULT_MODEL = FALLBACK_MODEL
 
 # Read + write only inside the dirs we hand it. No Bash, so a bad distillation
 # cannot shell out.
@@ -82,6 +88,20 @@ def auth_env() -> dict:
     return env
 
 
+def resolve_model(model: str | None = None) -> str:
+    """Name the model for a headless call: argument > SLEEP_MODEL > ANTHROPIC_MODEL > fallback.
+
+    ANTHROPIC_MODEL is the routing variable of the gateway configured in ~/.sleep/env, and
+    it only takes effect if the CLI is allowed to pick its own model. sleep always names one
+    on argv, so that line has to be read here as well or the model the operator chose is
+    overridden by the built-in default on every unattended pass.
+    """
+    if model:
+        return model
+    env = auth_env()
+    return env.get("SLEEP_MODEL") or env.get("ANTHROPIC_MODEL") or FALLBACK_MODEL
+
+
 def parse_json_output(text: str):
     """Read whatever the CLI printed as JSON.
 
@@ -110,9 +130,10 @@ def parse_json_output(text: str):
 
 
 def run(system_prompt_file: str, user_prompt: str, add_dirs: list[str],
-        allowed_tools: str = WRITE_TOOLS, model: str = DEFAULT_MODEL,
+        allowed_tools: str = WRITE_TOOLS, model: str | None = None,
         budget_usd: float = 1.0, timeout_s: int = 900,
         output_format: str | None = None, extra: list[str] | None = None) -> dict:
+    model = resolve_model(model)
     exe = ["claude"]
     try:
         exe = [binary()]
