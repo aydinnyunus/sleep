@@ -4,17 +4,71 @@
     {
       "id": "routify-timeout",
       "prompt": "A Go service behind an ALB started returning 500s after a config change. The upstream is a gateway called Routify that streams responses. The ALB config was not touched. Name the single most likely config value to check and where it lives.",
-      "criteria": "Names the ALB/WAF/idle timeout vs Routify streaming duration mismatch without asking for logs first."
+      "criteria": "Names the ALB/WAF/idle timeout vs Routify streaming duration mismatch without asking for logs first.",
+      "criteria_keywords": [
+        [
+          "idle timeout",
+          "idle_timeout",
+          "idle-timeout",
+          "request timeout",
+          "read timeout",
+          "inactivity timeout"
+        ],
+        [
+          "alb",
+          "load balancer",
+          "load-balancer",
+          "waf",
+          "proxy"
+        ]
+      ]
     },
     {
       "id": "mcp-literal-creds",
       "prompt": "An MCP server I added works locally but every request from the agent is a 401. The config file has the token in plain text and the environment variable is set correctly. What is the most likely cause?",
-      "criteria": "Concludes these MCP servers need literal values and do not expand environment variables."
+      "criteria": "Concludes these MCP servers need literal values and do not expand environment variables.",
+      "criteria_keywords": [
+        [
+          "literal",
+          "not expanded",
+          "does not expand",
+          "no env expansion",
+          "not env-expanded",
+          "not environment-expanded",
+          "no environment expansion",
+          "does not do env",
+          "doesnt expand",
+          "does not expand env"
+        ],
+        [
+          "token",
+          "authorization",
+          "bearer",
+          "header"
+        ]
+      ]
     },
     {
       "id": "weight-field-missing",
       "prompt": "I create a GitLab issue through the API in the vulnerability-management task-tracking project with weight set to 3. The issue is created but the weight column is empty in the UI. Give the most likely reason.",
-      "criteria": "Identifies that the weight field is not accepted / silently dropped for that project or API version, rather than a permissions problem."
+      "criteria": "Identifies that the weight field is not accepted / silently dropped for that project or API version, rather than a permissions problem.",
+      "criteria_keywords": [
+        [
+          "not accepted",
+          "silently dropped",
+          "silently ignored",
+          "is dropped",
+          "gets dropped",
+          "not supported",
+          "unsupported",
+          "ignored by",
+          "read-only",
+          "not persisted"
+        ],
+        [
+          "weight"
+        ]
+      ]
     }
   ]
 }

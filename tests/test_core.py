@@ -16,7 +16,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 TMP = tempfile.mkdtemp(prefix="sleeptest-")
 os.environ["SLEEP_HOME"] = TMP
 
-from sleepkit import paths, safety, store, consolidate  # noqa: E402
+from sleepkit import paths, safety, store, consolidate, llm  # noqa: E402
 paths.SLEEP_HOME = TMP
 paths.CLAUDE_HOME = os.path.join(TMP, "fake-claude-home")
 
@@ -25,6 +25,28 @@ os.makedirs(MEMORY, exist_ok=True)
 with open(os.path.join(MEMORY, "MEMORY.md"), "w", encoding="utf-8") as fh:
     fh.write("# Project Memory Index\n\n## User Preferences\n"
              "- **existing**: hand written, must survive untouched\n")
+
+
+# Hand-written paraphrases of each shipped task's criteria, plus a plausible wrong
+# diagnosis. The keyword anchors in replay/tasks.json were derived from prose, so
+# these two sentences are what keep them honest: an anchor that stops matching a
+# correct answer, or starts matching a wrong one, fails here rather than after a paid
+# night of model calls.
+GOLD_ANSWERS = {
+    "routify-timeout": (
+        "The ALB idle timeout is shorter than the Routify stream, so the connection "
+        "is cut mid-response; raise the idle timeout or keep the stream alive.",
+        "Cloudflare 522 says the origin is unreachable, so check the DNS records."),
+    "mcp-literal-creds": (
+        "These server entries take the token literally and do not expand environment "
+        "variables, so the placeholder in the Authorization header goes out verbatim "
+        "and the gateway answers 401.",
+        "The token expired; mint a fresh one and the 401 will clear."),
+    "weight-field-missing": (
+        "That API version does not accept the weight field, so the value is silently "
+        "dropped and the UI has nothing to show.",
+        "Your token lacks the api scope for that project, so it is a permissions problem."),
+}
 
 
 class T(unittest.TestCase):
@@ -152,6 +174,25 @@ class T(unittest.TestCase):
         self.assertIn("directive-shaped", out["refused"][0]["result"])
         self.assertEqual(out["proposals"], 2, out)
         self.assertEqual(consolidate.parse_stdout("no markers here at all"), [])
+
+    def test_closing_fence_is_not_memory(self):
+        """A model mirrors the opening marker with a closing `===`.
+
+        That fence is protocol. Stored verbatim it becomes the last line of a T1
+        record, and then the last line an agent reads months later, which is how
+        c17934668303284 ended up carrying a separator in its body.
+        """
+        text = (consolidate.PROPOSAL_SEP + "\n"
+                + "source: user\nkind: preference\ntrust: observed\n\n"
+                + "Ask for the failing test name before proposing a fix.\n===\n")
+        parsed = consolidate.parse_stdout(text)
+        self.assertEqual(len(parsed), 1, parsed)
+        self.assertEqual(parsed[0]["body"],
+                         "Ask for the failing test name before proposing a fix.")
+        self.assertNotIn("=", parsed[0]["body"])
+        # a block that is nothing but a fence is not a candidate
+        only = consolidate.PROPOSAL_SEP + "\nsource: user\nkind: fact\n\n===\n"
+        self.assertEqual(consolidate.parse_stdout(only), [])
 
     def test_proposal_headers_parsed(self):
         parsed = consolidate.parse_proposal(
@@ -370,6 +411,215 @@ class T(unittest.TestCase):
         self.assertNotIn("proposals", rep)
         self.assertFalse(os.path.exists(os.path.join(TMP, ".sleep.lock")),
                          "a skipped run must not leave a lock behind")
+
+
+    def test_replay_answer_text_reads_the_answer_not_the_envelope(self):
+        from sleepkit import replay as rp
+        self.assertEqual(
+            rp.answer_text({"json": {"type": "result", "num_turns": 4, "usage": {"x": 1},
+                                     "result": "  the alb idle timeout  "}}),
+            "the alb idle timeout")
+        self.assertEqual(
+            rp.answer_text({"json": [{"type": "assistant", "result": "first"},
+                                     {"type": "result", "result": "second"}]}), "second",
+            "the last payload item is the answer, not the first")
+        self.assertEqual(rp.answer_text({"json": None, "stdout": "raw fallback"}),
+                         "raw fallback")
+        self.assertEqual(rp.answer_text({"json": {"num_turns": 1}, "stdout": ""}), "")
+
+    def test_replay_drift_ignores_layout_and_flags_a_different_answer(self):
+        from sleepkit import replay as rp
+        a = "The ALB idle timeout ends the stream at 500 seconds."
+        self.assertEqual(rp.answer_drift(a, a.upper()), 0.0, "case is not a change")
+        self.assertEqual(rp.answer_drift(a, a + "     "), 0.0, "layout is not a change")
+        self.assertGreater(
+            rp.answer_drift(a, "Send me the access logs before I can say anything."), 0.3)
+        self.assertEqual(rp.answer_drift("", ""), 0.0, "two empty answers are not a change")
+
+    def test_replay_criteria_needs_every_group_and_takes_any_spelling(self):
+        from sleepkit import replay as rp
+        task = {"criteria_keywords": [["idle timeout", "idle_timeout"],
+                                      ["alb", "load balancer"]]}
+        met = rp.criteria_check(task, "Your ALB idle_timeout is shorter than the stream")
+        self.assertTrue(met["measurable"])
+        self.assertTrue(met["met"], met)
+        half = rp.criteria_check(task, "The idle timeout looks too short to me")
+        self.assertFalse(half["met"])
+        self.assertEqual(half["missing"], ["alb|load balancer"],
+                         "missing names the alternatives, so a human can fix the anchor")
+        self.assertFalse(rp.criteria_check(task, "")["met"])
+
+    def test_replay_forbidden_phrase_sinks_an_otherwise_matching_answer(self):
+        from sleepkit import replay as rp
+        task = {"criteria_keywords": ["idle timeout"], "criteria_forbid": ["expired token"]}
+        good = rp.criteria_check(task, "the idle timeout is the cause")
+        bad = rp.criteria_check(task, "the idle timeout, or maybe an expired token")
+        self.assertTrue(good["met"], good)
+        self.assertFalse(bad["met"])
+        self.assertEqual(bad["forbidden"], ["expired token"])
+
+    def test_replay_prose_only_criteria_can_not_produce_a_verdict(self):
+        from sleepkit import replay as rp
+        # An unmeasured task must not be able to lift a claim: scoring a prose-only
+        # criteria on a guess is how a bad memory turns into evidence.
+        c = rp.criteria_check({"criteria": "names the right cause"}, "anything at all")
+        self.assertFalse(c["measurable"])
+        self.assertIsNone(c["met"])
+        self.assertEqual(rp.verdict(c, c, True),
+                         "not measurable: criteria are prose only")
+        self.assertEqual(rp.verdict(c, c, False),
+                         "not measured: no provisional memory reached the on-runs")
+        self.assertEqual(rp.criteria_cell({"criteria_off": c, "criteria_on": c}), "n/a")
+
+    def test_replay_verdict_is_the_weakest_claim_the_pair_supports(self):
+        from sleepkit import replay as rp
+        met = {"measurable": True, "met": True, "missing": [], "forbidden": []}
+        miss = {"measurable": True, "met": False, "missing": ["alb"], "forbidden": []}
+        trip = {"measurable": True, "met": False, "missing": [], "forbidden": ["expired token"]}
+        self.assertEqual(rp.verdict(miss, met, True), "helped")
+        self.assertEqual(rp.verdict(met, miss, True), "hurt")
+        self.assertEqual(rp.verdict(met, met, True), "tie: both met")
+        self.assertEqual(rp.verdict(miss, miss, True), "tie: both missed")
+        # No treatment is not a tie: the two arms ran the same prompt, so nothing was
+        # compared. That branch has to say so out loud.
+        self.assertTrue(rp.verdict(miss, met, False).startswith("not measured"))
+        self.assertEqual(rp.criteria_cell({"criteria_off": miss, "criteria_on": met}),
+                         "miss/met")
+        self.assertEqual(rp.criteria_cell({"criteria_off": met, "criteria_on": trip}),
+                         "met/tripped")
+
+    def test_shipped_tasks_are_measurable_and_the_anchors_separate_causes(self):
+        from sleepkit import replay as rp
+        tasks = {t["id"]: t for t in rp.load_tasks(rp.DEFAULT_TASKS)}
+        self.assertEqual(sorted(tasks), ["mcp-literal-creds", "routify-timeout",
+                                        "weight-field-missing"])
+        for tid, task in sorted(tasks.items()):
+            self.assertTrue(rp.criteria_check(task, "")["measurable"],
+                            "%s has no criteria_keywords, so it cannot be measured" % tid)
+            gold, wrong = GOLD_ANSWERS[tid]
+            scored = rp.criteria_check(task, gold)
+            self.assertTrue(scored["met"],
+                            "%s: a correct answer fails its own anchors: %s" % (tid, scored))
+            self.assertFalse(rp.criteria_check(task, wrong)["met"],
+                             "%s: a wrong diagnosis passes its own anchors" % tid)
+            self.assertNotIn("criteria_forbid", task,
+                             "a substring rule cannot tell an asserted cause from a "
+                             "ruled-out one, so nothing is forbidden in the shipped set")
+
+    def test_replay_due_clock_gates_the_unattended_pass(self):
+        import datetime
+        from sleepkit import replay as rp
+        self.addCleanup(paths.write_state, {"last_replay": None})
+        paths.write_state({"last_replay": None})
+        due, why = rp.replay_due(168.0)
+        self.assertTrue(due, why)
+        self.assertIn("no replay pass", why)
+        paths.write_state({"last_replay": paths.now()})
+        due, why = rp.replay_due(168.0)
+        self.assertFalse(due, why)
+        self.assertIn("of 168.0 h", why)
+        week_ago = (datetime.datetime.now().astimezone()
+                    - datetime.timedelta(days=8)).strftime("%Y-%m-%dT%H:%M:%S%z")
+        paths.write_state({"last_replay": week_ago})
+        due, why = rp.replay_due(168.0)
+        self.assertTrue(due, why)
+        self.assertIn("h since the last pass", why)
+        paths.write_state({"last_replay": "not a timestamp"})
+        self.assertTrue(rp.replay_due(168.0)[0],
+                        "an unreadable clock must not silence the pass forever")
+        self.assertTrue(rp.replay_due(0.0)[0], "interval 0 means every night is due")
+
+    def test_replay_nightly_returns_failures_as_data(self):
+        from sleepkit import replay as rp
+        self.addCleanup(paths.write_state, {"last_replay": None})
+        paths.write_state({"last_replay": None})
+        out = rp.nightly(tasks_path=os.path.join(TMP, "no-such-tasks.json"),
+                         model="m", interval_hours=168.0)
+        self.assertTrue(out.get("failed"), out)
+        self.assertTrue(out["reason"].startswith("FileNotFoundError"), out)
+        self.assertNotIn("last_replay", {k: v for k, v in paths.read_state().items()
+                                         if v is not None},
+                         "a failed pass must not consume the interval")
+
+
+class ProposalContract(unittest.TestCase):
+    """The shapes of model output that are not the contract.
+
+    The literal marker is what the prompt asks for and what the tests above use. Real
+    output drifts: the marker arrives padded or inside a code fence, or is left out
+    while the blocks are still there. A paid call that produced three observations and
+    parsed as zero is a silent failure, so the tolerant paths are pinned and the split
+    mode is reported.
+    """
+
+    BLOCK = ("source: agent\nkind: fact\ntrust: observed\n\n"
+             "The proxy drops the Authorization header on redirects, so a retry after a "
+             "301 has to read it from Vault again.")
+
+    def test_padded_and_fenced_markers_still_split(self):
+        for sep in ("===PROPOSAL===", "=== PROPOSAL ===", "===proposal===",
+                    "```===PROPOSAL===```"):
+            parsed = consolidate.parse_stdout(sep + "\n" + self.BLOCK)
+            self.assertEqual(len(parsed), 1, "%s -> %r" % (sep, parsed))
+
+    def test_blocks_survive_a_missing_marker(self):
+        text = "Commentary that is not a proposal.\n\n" + self.BLOCK
+        parsed = consolidate.parse_stdout(text)
+        self.assertEqual(len(parsed), 1, parsed)
+        self.assertEqual(consolidate.split_blocks(text)[1], "header")
+
+    def test_prose_only_reports_none(self):
+        # The other half of the same rule: no blocks and no marker is a night with
+        # nothing to keep, and it has to read differently from a swallowed answer.
+        self.assertEqual(consolidate.split_blocks("Nothing worth carrying here."),
+                         ([], "none"))
+        self.assertEqual(consolidate.parse_stdout("Nothing worth carrying here."), [])
+
+
+class HeadlessLogin(unittest.TestCase):
+    """Where credentials come from when launchd hands the job nothing.
+
+    A launchd job gets the PATH written into its plist and no inherited token, so the
+    values a human's shell would have passed on live in a 0600 file beside the store.
+    They are parsed rather than sourced, because the alternative executes whatever the
+    file contains, and a real variable keeps winning so an interactive shell is never
+    overridden by a stale line on disk.
+    """
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp(prefix="sleepenv-")
+        self.addCleanup(shutil.rmtree, self.dir, ignore_errors=True)
+
+    def merge(self, text):
+        prev = paths.SLEEP_HOME
+        paths.SLEEP_HOME = self.dir
+        self.addCleanup(setattr, paths, "SLEEP_HOME", prev)
+        with open(os.path.join(self.dir, "env"), "w", encoding="utf-8") as fh:
+            fh.write(text)
+        return llm.auth_env()
+
+    def test_file_lines_are_read_without_a_shell(self):
+        env = self.merge('# a comment\n\nexport SLEEP_TEST_QUOTED="two words"\n'
+                         'SLEEP_TEST_PLAIN=plain\n')
+        self.assertEqual(env.get("SLEEP_TEST_QUOTED"), "two words")
+        self.assertEqual(env.get("SLEEP_TEST_PLAIN"), "plain")
+
+    def test_missing_file_is_not_an_error(self):
+        self.assertEqual(llm.env_overrides(os.path.join(self.dir, "absent")), {})
+
+    def test_a_real_variable_beats_the_file(self):
+        os.environ["SLEEP_TEST_WINS"] = "from the shell"
+        self.addCleanup(os.environ.pop, "SLEEP_TEST_WINS", None)
+        env = self.merge("SLEEP_TEST_WINS=from the file\nSLEEP_TEST_ONLY=from the file\n")
+        self.assertEqual(env.get("SLEEP_TEST_WINS"), "from the shell")
+        self.assertEqual(env.get("SLEEP_TEST_ONLY"), "from the file")
+
+    def test_a_malformed_line_fails_loudly(self):
+        # Skipped silently, a typo here meant the whole night ran unauthenticated and
+        # still reported success. One clear error at the start is the cheaper failure.
+        with self.assertRaises(ValueError) as ctx:
+            self.merge("# c\nSLEEP_TEST_A=1\nthis is not a line\n")
+        self.assertIn("line 3", str(ctx.exception))
 
 
 if __name__ == "__main__":

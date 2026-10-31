@@ -27,6 +27,7 @@ import glob
 import hashlib
 import json
 import os
+import plistlib
 import shutil
 import subprocess
 import sys
@@ -517,6 +518,33 @@ class Gates(Sandbox):
         self.assertEqual(self.tree_state(self.memory), before_mem)
         self.assertEqual(self.tree_state(self.sleep_home), before_sleep)
 
+    def test_promoted_file_carries_the_text_not_only_frontmatter(self):
+        """The T2 file must hold the memory itself.
+
+        `emit(record, body)` takes the body as an argument, and promote called it
+        with one argument: the store received a 245-byte frontmatter husk whose
+        only trace of the fact was the truncated index line in MEMORY.md.
+        """
+        text = ("Rtk gain reports token savings, and the binary must be resolved "
+                "with `which rtk` first because Rust Type Kit uses the same name.")
+        self.write(os.path.join(self.memory, "MEMORY.md"), "# Index\n")
+        self.seed_candidate("cbody", text, cwd=self.proj_a)
+        got = self.cli("promote", "cbody", "--memory-dir", self.memory)
+        self.assertEqual(got.returncode, 0, got.stdout + got.stderr)
+        written = [f for f in os.listdir(self.memory) if f.endswith(".md") and f != "MEMORY.md"]
+        self.assertEqual(len(written), 1, written)
+        body_file = self.read(os.path.join(self.memory, written[0]))
+        self.assertIn(text, body_file, "the promoted file must contain the full text")
+        self.assertGreater(len(body_file), len(text) + 40, "not a frontmatter husk")
+        self.assertIn("status: promoted", body_file,
+                      "a T2 record must not claim to be provisional")
+        self.assertNotIn("status: provisional", body_file)
+        # the index is rewritten, so the previous copy has to survive somewhere
+        bdir = os.path.join(self.sleep_home, "archive", "memory")
+        backups = [f for f in os.listdir(bdir) if f.startswith("MEMORY.md.bak-")] if os.path.isdir(bdir) else []
+        self.assertEqual(len(backups), 1, backups)
+        self.assertIn("# Index", self.read(os.path.join(bdir, backups[0])))
+
     def test_promote_an_unknown_id_fails_and_leaves_state_intact(self):
         self.cli("status")
         self.seed_candidate("ckeep", "Any provisional record at all.", cwd=self.proj_a)
@@ -932,6 +960,263 @@ class InstallUninstall(Sandbox):
         self.assertEqual(again.returncode, 0, again.stderr[-1500:])
         self.assertEqual(digest(self.settings_path), after, "uninstall must be idempotent")
 
+
+FAKE_CLAUDE = """#!/usr/bin/env python3
+import json, os, sys
+prompt = sys.stdin.read()
+key = "SLEEP_FAKE_ON" if "provisional-memory" in prompt else "SLEEP_FAKE_OFF"
+print(json.dumps({"type": "result", "num_turns": 3, "total_cost_usd": 0.01,
+                  "duration_ms": 120, "session_id": "fake",
+                  "result": os.environ[key]}))
+"""
+
+
+FAKE_CLAUDE_SILENT = """#!/usr/bin/env python3
+import json, sys
+sys.stdin.read()
+print("Not logged in. Please run /login")
+print(json.dumps({"type": "result", "is_error": True, "num_turns": 1,
+                  "total_cost_usd": 0.0, "duration_ms": 5, "session_id": "fake",
+                  "result": "Not logged in. Please run /login"}))
+sys.exit(1)
+"""
+
+FAKE_CLAUDE_PROSE = """#!/usr/bin/env python3
+import json, sys
+sys.stdin.read()
+print(json.dumps({"type": "result", "num_turns": 1, "total_cost_usd": 0.01,
+                  "duration_ms": 50, "session_id": "fake",
+                  "result": "Nothing worth carrying forward. The session was routine."}))
+"""
+
+
+class Unattended(Sandbox):
+    """The replay and nightly path, driven the way launchd drives it.
+
+    Every model call here goes to a fake claude on CLAUDE_BIN that answers from its
+    stdin: it returns the ON answer only when the provisional-memory block actually
+    reached the prompt. That makes the treatment itself observable, which is what the
+    scorer used to assert without any evidence. The poison claude in the sandbox bin
+    still fails the test if any code path goes looking for the real binary.
+    """
+
+    ON = "The ALB idle timeout is 300s while the stream runs 500s, so it is cut."
+    OFF = "I need the access logs before I can say what dropped the connection."
+
+    def fake_claude(self):
+        self._make_script("fake-claude", FAKE_CLAUDE)
+        return os.path.join(self.bin, "fake-claude")
+
+    def tasks_file(self, measurable=True):
+        task = {"id": "idle-timeout",
+                "prompt": "Our long streaming calls die at 500 seconds. Why?",
+                "criteria": "Names the ALB idle timeout as the cause."}
+        if measurable:
+            task["criteria_keywords"] = [["idle timeout", "idle_timeout"],
+                                         ["alb", "load balancer"]]
+        return self.write_json(self.at("tasks.json"), {"tasks": [task]})
+
+    def test_replay_run_scores_the_treatment_it_claims(self):
+        self.seed_candidate("c-mem-1",
+                            "ALB idle timeout is 300s, shorter than the 500s Routify stream.")
+        res = self.cli("replay", "--tasks", self.tasks_file(), "--limit", "1", "--run",
+                       CLAUDE_BIN=self.fake_claude(),
+                       SLEEP_FAKE_ON=self.ON, SLEEP_FAKE_OFF=self.OFF)
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        self.assertIn("treatment delivered: yes", res.stdout)
+        self.assertIn("criteria miss/met", res.stdout)
+        self.assertIn("helped", res.stdout)
+        path = [line.split("report: ", 1)[1].strip()
+                for line in res.stdout.splitlines() if line.startswith("report: ")]
+        self.assertEqual(len(path), 1, res.stdout)
+        report = self.read(path[0])
+        self.assertIn("| idle-timeout | helped | miss/met |", report)
+        self.assertIn("treatment delivered: yes", report)
+
+    def test_replay_run_says_nothing_was_measured_without_memory(self):
+        # Same fake, same task, no provisional record: the two arms then ran the same
+        # prompt, so a report that claimed helped or hurt would be a fabrication.
+        res = self.cli("replay", "--tasks", self.tasks_file(), "--limit", "1", "--run",
+                       CLAUDE_BIN=self.fake_claude(),
+                       SLEEP_FAKE_ON=self.ON, SLEEP_FAKE_OFF=self.OFF)
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        self.assertIn("treatment delivered: NO", res.stdout)
+        self.assertIn("not measured: no provisional memory reached the on-runs", res.stdout)
+        self.assertNotIn("helped", res.stdout)
+
+    def test_replay_dry_run_flags_a_task_it_cannot_measure(self):
+        res = self.cli("replay", "--tasks", self.tasks_file(measurable=False))
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        self.assertIn("NOT MEASURABLE", res.stdout)
+        self.assertNotIn("NOT MEASURABLE",
+                         self.cli("replay", "--tasks", self.tasks_file()).stdout)
+
+    def fake_claude_named(self, name, script):
+        self._make_script(name, script)
+        return os.path.join(self.bin, name)
+
+    def test_a_silent_model_does_not_spend_the_weekly_replay_clock(self):
+        # Measured on this laptop: launchd hands the job no inherited token, every
+        # sample exited 1, and the report came back as rows of "tie: both missed" with
+        # the weekly clock already stamped. A pass where nothing answered is not a
+        # measurement, and dating it as one hides the failure for a week.
+        silent = self.fake_claude_named("fake-claude-silent", FAKE_CLAUDE_SILENT)
+        res = self.cli("nightly", "--min-records", "99", "--replay-tasks",
+                       self.tasks_file(), "--replay-limit", "1", "--replay-interval",
+                       "168", CLAUDE_BIN=silent)
+        doc = json.loads(res.stdout)
+        self.assertTrue(doc["replay"].get("failed"), doc["replay"])
+        self.assertIn("no model call answered", doc["replay"]["reason"])
+        self.assertEqual(res.returncode, 3, res.stdout + res.stderr)
+        state_path = os.path.join(self.sleep_home, "state.json")
+        state = self.read_json(state_path) if os.path.exists(state_path) else {}
+        self.assertNotIn("last_replay", state,
+                         "a pass where nothing answered must not consume the interval")
+
+    def test_a_failed_consolidation_is_not_reported_as_a_good_night(self):
+        # launchd only reads the exit code. Returning 0 while the model call failed
+        # means nobody ever looks, which is how a nightly that produced nothing for a
+        # week would stay invisible.
+        for text in ("first observation", "second observation", "third observation"):
+            self.assertEqual(
+                self.cli("capture", "--text", text, "--source", "user").returncode, 0)
+        silent = self.fake_claude_named("fake-claude-silent", FAKE_CLAUDE_SILENT)
+        res = self.cli("nightly", "--min-records", "2", "--min-interval", "0",
+                       "--replay-interval", "168", CLAUDE_BIN=silent)
+        doc = json.loads(res.stdout)
+        self.assertEqual(doc["sleep"]["action"], "ran", doc["sleep"])
+        self.assertFalse(doc["sleep"]["ok"], doc["sleep"])
+        self.assertEqual(res.returncode, 3, res.stdout + res.stderr)
+
+    def test_a_night_with_nothing_to_keep_says_which_kind_of_night_it_was(self):
+        # An empty night and a swallowed night used to look identical in the log. The
+        # model answered cleanly here and produced no proposal-shaped block, so the
+        # result must name that, while still reporting a successful night.
+        for text in ("first observation", "second observation", "third observation"):
+            self.assertEqual(
+                self.cli("capture", "--text", text, "--source", "user").returncode, 0)
+        prose = self.fake_claude_named("fake-claude-prose", FAKE_CLAUDE_PROSE)
+        res = self.cli("nightly", "--min-records", "2", "--min-interval", "0",
+                       "--replay-interval", "168", CLAUDE_BIN=prose)
+        doc = json.loads(res.stdout)
+        self.assertEqual(doc["sleep"]["action"], "ran", doc["sleep"])
+        self.assertEqual(doc["sleep"]["parse"]["mode"], "none", doc["sleep"])
+        self.assertIn("no block matched the proposal contract", doc["sleep"]["warn"])
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+
+    def test_nightly_reports_both_halves_and_never_promotes(self):
+        for text in ("first observation", "second observation", "third observation"):
+            self.assertEqual(
+                self.cli("capture", "--text", text, "--source", "user").returncode, 0)
+        t2_before = self.tree_state(self.memory)
+        res = self.cli("nightly", "--dry-run")
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        doc = json.loads(res.stdout)
+        self.assertEqual(doc["sleep"]["action"], "would-run",
+                         "the gate runs before the dry-run branch, so 3 buffered "
+                         "records must reach would-run: %s" % doc["sleep"])
+        self.assertTrue(doc["replay"]["skipped"])
+        self.assertEqual(doc["replay"]["reason"], "dry run")
+        self.assertEqual(self.tree_state(self.memory), t2_before,
+                         "an unattended pass must not write to T2")
+
+    def test_nightly_stamps_the_replay_clock_and_then_waits(self):
+        args = ("nightly", "--min-records", "99", "--replay-tasks", self.tasks_file(),
+                "--replay-limit", "1", "--replay-interval", "168")
+        first = self.cli(*args, CLAUDE_BIN=self.fake_claude(),
+                         SLEEP_FAKE_ON=self.ON, SLEEP_FAKE_OFF=self.OFF)
+        self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
+        doc = json.loads(first.stdout)
+        self.assertEqual(doc["sleep"]["action"], "skipped",
+                         "min-records 99 keeps the consolidation half out of this test")
+        self.assertTrue(doc["replay"].get("ran"), doc["replay"])
+        self.assertIn("verdict_tally", doc["replay"])
+        state = self.read_json(os.path.join(self.sleep_home, "state.json"))
+        self.assertIn("last_replay", state)
+        second = self.cli(*args, CLAUDE_BIN=self.fake_claude(),
+                          SLEEP_FAKE_ON=self.ON, SLEEP_FAKE_OFF=self.OFF)
+        self.assertEqual(second.returncode, 0, second.stdout + second.stderr)
+        doc2 = json.loads(second.stdout)
+        self.assertTrue(doc2["replay"].get("skipped"), doc2["replay"])
+        self.assertIn("of 168.0 h", doc2["replay"]["reason"])
+        zero = self.cli("nightly", "--min-records", "99", "--replay-tasks",
+                        self.tasks_file(), "--replay-limit", "1",
+                        "--replay-interval", "0", CLAUDE_BIN=self.fake_claude(),
+                        SLEEP_FAKE_ON=self.ON, SLEEP_FAKE_OFF=self.OFF)
+        self.assertTrue(json.loads(zero.stdout)["replay"].get("ran"),
+                        "interval 0 is the escape hatch: every pass is due")
+
+    def test_nightly_turns_a_missing_binary_into_json_not_a_traceback(self):
+        # What an unattended 03:41 run looks like when the laptop has no claude
+        # installed on this PATH. Both lookups have to be taken away: CLAUDE_BIN and
+        # PATH, because binary() falls through from one to the other.
+        res = self.cli("nightly", "--min-records", "99", "--replay-tasks",
+                       self.tasks_file(), "--replay-limit", "1", "--replay-interval",
+                       "168", PATH="/bin:/usr/bin")
+        doc = json.loads(res.stdout)
+        self.assertTrue(doc["replay"].get("failed"), doc["replay"])
+        self.assertIn("FileNotFoundError", doc["replay"]["reason"])
+        self.assertEqual(res.returncode, 3, res.stdout + res.stderr)
+        self.assertNotIn("Traceback", res.stdout + res.stderr,
+                         "an unattended failure must read as data in a log file")
+        state_path = os.path.join(self.sleep_home, "state.json")
+        state = self.read_json(state_path) if os.path.exists(state_path) else {}
+        self.assertNotIn("last_replay", state,
+                         "a failed pass must not consume the interval")
+
+
+class NightlyJob(Sandbox):
+    """The launchd step, tested as the shape of a job that runs with nobody watching.
+
+    The rendered plist IS the behaviour at 03:41, and two real defects lived inside it.
+    One: the installer never substituted the token this template used for the user's
+    home, so every rendered job would have carried the literal "__HOME__/.local/bin" as
+    PATH and lost both claude and python3 with it. Two: a prose comment here once
+    contained "--min-interval", and XML 1.0 forbids "--" inside a comment: plutil -lint
+    called that file OK and launchctl load accepted it into the live domain, while
+    python's own parser rejected it at line 10. Both are pinned here, not in a comment.
+    """
+
+    def fake_root(self, broken=False):
+        """A copy of the files install.sh reads, so a broken template can be tested
+        without ever editing the repo's own plist."""
+        root = tempfile.mkdtemp(prefix="sleep-root-", dir=self.tmp)
+        for rel in ("install.sh", "uninstall.sh", "sleep.py"):
+            shutil.copy2(os.path.join(REPO, rel), os.path.join(root, rel))
+        for rel in ("launchd", "hooks", "tools", os.path.join("skill", "sleep")):
+            dst = os.path.join(root, rel)
+            os.makedirs(os.path.dirname(dst), exist_ok=True)
+            shutil.copytree(os.path.join(REPO, rel), dst)
+        if broken:
+            path = os.path.join(root, "launchd", "com.aydinnyunus.sleep-nightly.plist")
+            text = self.read(path).replace("min_interval 0 here", "--min-interval 0 here", 1)
+            self.write(path, text)
+        return root
+
+    def test_the_rendered_job_parses_strictly_and_holds_no_placeholder(self):
+        got = self.bash(INSTALL, "--skip-tests", "--launchd", SLEEP_SKIP_LOAD="1")
+        self.assertEqual(got.returncode, 0, got.stdout[-1500:] + got.stderr[-1500:])
+        self.assertIn("rendered and linted", got.stdout, got.stdout[-800:])
+        doc = plistlib.loads(self.read(os.path.join(
+            self.home, "Library", "LaunchAgents",
+            "com.aydinnyunus.sleep-nightly.plist")).encode("utf-8"))
+        argv = doc["ProgramArguments"]
+        self.assertIn("nightly", argv, "the job must run the combined pass")
+        self.assertIn("--replay-interval", argv)
+        self.assertEqual(doc["StartCalendarInterval"], {"Hour": 3, "Minute": 41})
+        self.assertEqual(doc["EnvironmentVariables"]["PATH"], self.home
+                         + "/.local/bin:/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin",
+                         "the PATH a nightly run inherits is part of the product")
+        self.assertEqual(doc["StandardOutPath"],
+                         os.path.join(self.sleep_home, "logs", "nightly.log"))
+
+    def test_a_plist_only_a_lenient_parser_accepts_is_refused(self):
+        root = self.fake_root(broken=True)
+        got = self.bash(os.path.join(root, "install.sh"), "--skip-tests", "--launchd",
+                        SLEEP_SKIP_LOAD="1")
+        self.assertIn("REFUSED", got.stdout, got.stdout[-800:])
+        self.assertNotIn("rendered and linted", got.stdout,
+                         "a plist that fails the strict lint must not reach launchctl")
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
