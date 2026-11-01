@@ -110,6 +110,48 @@ class T(unittest.TestCase):
         self.assertFalse(ok2)
         self.assertIn("duplicate of", why)
 
+    def test_agent_relearned_fact_records_rediscovery_not_duplicate(self):
+        """The reviewer's 'rediscovered twice is worth keeping' filter signal: when the
+        agent independently re-proposes a fact it already holds as a provisional in a
+        different session, we do not shelf a noise duplicate; we mark the rediscovery on
+        the existing record so the reviewer can weigh it. It stays provisional (not a
+        directive), trust is unchanged, and a same-session repeat is NOT a rediscovery."""
+        ok, cid = store.add_candidate("the staging gateway needs X-Route blue",
+                                      kind="fact", source="agent", trust="observed",
+                                      cwd="/tmp/proj", session="sess-a")
+        self.assertTrue(ok, cid)
+        # same session again: not a rediscovery, plain duplicate
+        ok2, why2 = store.add_candidate("staging gateway needs X-Route blue please",
+                                        kind="fact", source="agent", trust="observed",
+                                        cwd="/tmp/proj", session="sess-a")
+        self.assertFalse(ok2)
+        self.assertIn("duplicate of", why2)
+        self.assertNotIn("rediscovered", why2)
+        got, _ = store.get_candidate(cid)
+        self.assertIsNone(got.get("rediscovered"))
+        # different session: rediscovery recorded on the existing record, no new file
+        ok3, why3 = store.add_candidate("the staging gateway requires X-Route blue header",
+                                        kind="fact", source="agent", trust="observed",
+                                        cwd="/tmp/proj", session="sess-b")
+        self.assertFalse(ok3)
+        self.assertIn("rediscovered in a later session", why3)
+        self.assertIn(cid, why3)
+        got2, _ = store.get_candidate(cid)
+        self.assertEqual(got2.get("rediscovered"), "1")
+        # the record's own session is the baseline; the rediscovery is appended
+        self.assertEqual(got2.get("rediscovered_in"), "sess-a|sess-b")
+        self.assertEqual(got2.get("status"), "provisional")
+        self.assertEqual(got2.get("trust"), "observed")
+        self.assertEqual(len(store.list_candidates()), 1)
+        # third session bumps the count (phrase stays within the 0.6 duplicate gate)
+        ok4, why4 = store.add_candidate("the staging gateway needs X-Route blue header",
+                                        kind="fact", source="agent", trust="observed",
+                                        cwd="/tmp/proj", session="sess-c")
+        self.assertFalse(ok4)
+        got3, _ = store.get_candidate(cid)
+        self.assertEqual(got3.get("rediscovered"), "2")
+        self.assertEqual(got3.get("rediscovered_in"), "sess-a|sess-b|sess-c")
+
     def test_refused_paraphrase_is_rejected_not_reborn(self):
         """The reviewer's replay concern: a refused idea coming back paraphrased in a
         later session must not become a fresh provisional for re-review. It is judged

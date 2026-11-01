@@ -115,9 +115,11 @@ def cmd_status(a) -> int:
         _p("")
         _p("provisional (context only, never directives):")
         for c in prov[-12:]:
-            _p("  %-10s %-8s %-11s %s" % (c["id"], c.get("source", "?"),
-                                          c.get("trust", "?"),
-                                          c.get("_body", "").replace("\n", " ")[:88]))
+            rd = c.get("rediscovered")
+            tag = ("  [rediscovered x%s in %s sessions]" % (rd, c.get("rediscovered_in", "").strip("|")) if rd else "")
+            _p("  %-10s %-8s %-11s %s%s" % (c["id"], c.get("source", "?"),
+                                            c.get("trust", "?"),
+                                            c.get("_body", "").replace("\n", " ")[:88], tag))
     if ref:
         _p("")
         _p("refused (last 5, earlier rejections stay on record):")

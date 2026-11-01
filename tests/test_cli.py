@@ -370,6 +370,22 @@ class StatusShowInject(Sandbox):
         self.assertIn("read_api", listing,
                       "the provisional listing must show the body, not just id/source/trust "
                       "(fixed: cmd_status now passes with_body=True)")
+    def test_status_surfaces_a_relearned_agent_fact(self):
+        """The reviewer's 'rediscovered twice is worth keeping' signal is read-only
+        in status: a provisional the agent re-learned in a later session shows the
+        rediscovery marker but stays provisional (not a directive)."""
+        front = ("---\nid: cabc\nts: 2026-01-01T00:00:00+0300\nsource: agent\n"
+                 "trust: observed\nkind: fact\nstatus: provisional\nsession: sess-a\n"
+                 "cwd: %s\nrediscovered: 2\nrediscovered_in: sess-b|sess-c\n---\n"
+                 "staging gateway needs X-Route blue\n") % self.proj_a
+        self.write(os.path.join(self.sleep_home, "candidates", "cabc.md"), front)
+        got = self.cli("status")
+        self.assertEqual(got.returncode, 0, got.stderr)
+        self.assertIn("provisional (context only, never directives):", got.stdout)
+        self.assertIn("[rediscovered x2 in sess-b|sess-c sessions]", got.stdout)
+        # the record is listed as provisional, not permanent or refused
+        self.assertIn("cabc", got.stdout)
+        self.assertNotIn("[demoted:", got.stdout)
 
     def test_status_rejects_json_and_verbose_needs_no_model(self):
         self.seed_pool()

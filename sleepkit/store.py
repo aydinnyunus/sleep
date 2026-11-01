@@ -213,6 +213,44 @@ def refused_collision(text: str, threshold: float = REFUSED_DUP_THRESHOLD) -> tu
 
 
 # ------------------------------------------------------------- candidates ---
+def _record_rediscovery(cid: str, session: str) -> str | None:
+    """Record that an agent re-learned an existing candidate in another session.
+
+    Returns a human message when the session differs from the ones already recorded
+    (a genuine cross-session rediscovery), or None when it is the same session again
+    (that is a repeat, not a pattern, and the plain duplicate message applies).
+    """
+    got = get_candidate(cid)
+    if not got:
+        return None
+    meta, body = got
+    # The record's own session is the baseline: a repeat from the same session the
+    # fact was first filed in is a repeat, not a rediscovery. Only a *different*
+    # session counts.
+    sessions = [s for s in meta.get("rediscovered_in", "").split("|") if s]
+    own = (meta.get("session", "") or "").strip()
+    if own and own not in sessions:
+        sessions.append(own)
+    this = (session or "").strip()
+    if not this:
+        return None
+    if this in sessions:
+        return None
+    sessions.append(this)
+    n = int(meta.get("rediscovered", 0) or 0) + 1
+    meta["rediscovered"] = str(n)
+    meta["rediscovered_in"] = "|".join(sessions)
+    loc = paths.candidates_dir()
+    if not os.path.isfile(os.path.join(loc, cid + ".md")):
+        p = os.path.join(paths.archive_dir("candidates"), cid + ".md")
+        if os.path.isfile(p):
+            loc = paths.archive_dir("candidates")
+    with open(os.path.join(loc, cid + ".md"), "w", encoding="utf-8") as fh:
+        fh.write(emit(meta, body))
+    return "duplicate of %s (rediscovered in a later session: %d distinct sessions now; use `sleepctl show %s` to review)" % (
+        cid, n, cid)
+
+
 def add_candidate(text: str, kind: str = "fact", source: str = "agent",
                   trust: str = "observed", session: str = "", cwd: str = "",
                   evidence: list[str] | None = None, supersedes: list[str] | None = None,
@@ -237,6 +275,14 @@ def add_candidate(text: str, kind: str = "fact", source: str = "agent",
     pool = [(m["id"], m.get("_body", "")) for m in list_candidates(with_body=True)]
     dup, score = nearest(red, pool)
     if dup:
+        if source == "agent":
+            note = _record_rediscovery(dup, session)
+            if note:
+                # The agent independently re-learned a fact it already holds as a
+                # provisional candidate. It stays provisional (not a directive) and
+                # is not auto-kept; this just marks the cross-session rediscovery so
+                # the reviewer can weigh it. trust stays cap_trust(source) unchanged.
+                return False, note
         return False, "duplicate of %s (%.2f); use `sleepctl supersede %s %s`" % (
             dup, score, dup, "new-text")
     ref_id, ref_score = refused_collision(red)
