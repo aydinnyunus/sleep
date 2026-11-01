@@ -21,7 +21,11 @@ class PiPackage(unittest.TestCase):
         self.assertIn("pi-package", pkg["keywords"])
         self.assertEqual(pkg["pi"]["extensions"], ["./extension/index.ts"])
         self.assertEqual(pkg["pi"]["skills"], ["./skills"])
-        for relative in ("extension/index.ts", "skills/sleep/SKILL.md", "sleep.py"):
+        # Must be an open, redistributable license so others can reuse and contribute.
+        self.assertIn(pkg["license"], {"MIT", "Apache-2.0", "BSD-3-Clause", "BSD-2-Clause",
+                                      "ISC", "MPL-2.0", "0BSD"})
+        for relative in ("extension/index.ts", "skills/sleep/SKILL.md", "sleep.py",
+                         "LICENSE"):
             self.assertTrue(os.path.isfile(os.path.join(ROOT, relative)), relative)
 
     def test_tarball_contains_runtime_but_no_python_cache(self):
@@ -40,7 +44,7 @@ class PiPackage(unittest.TestCase):
         paths = {item["path"] for item in report["files"]}
         required = {"package.json", "extension/index.ts", "skills/sleep/SKILL.md",
                     "sleep.py", "sleepkit/cli.py", "prompts/consolidate.md",
-                    "replay/tasks.json"}
+                    "replay/tasks.json", "LICENSE"}
         self.assertEqual(required - paths, set(), sorted(paths))
         self.assertFalse(any("__pycache__" in path or path.endswith((".pyc", ".pyo"))
                              for path in paths), sorted(paths))

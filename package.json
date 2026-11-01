@@ -1,9 +1,9 @@
 {
   "name": "pi-sleep-agent",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "A reviewable sleep and dream cycle for Pi agent memory.",
   "type": "module",
-  "license": "UNLICENSED",
+  "license": "MIT",
   "author": {
     "name": "Yunus Aydin",
     "url": "https://github.com/aydinnyunus"
@@ -34,7 +34,8 @@
     "replay/tasks.json",
     "README.md",
     "docs/EVIDENCE.md",
-    ".github/assets/sleep-replay.png"
+    ".github/assets/sleep-replay.png",
+    "LICENSE"
   ],
   "scripts": {
     "test": "python3 -m unittest discover -s tests",
