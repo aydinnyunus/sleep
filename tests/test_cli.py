@@ -981,7 +981,7 @@ class InstallUninstall(Sandbox):
                          "install must clear omo entries, the engine cannot run them")
         self.assertTrue(os.path.islink(self.skill_link()))
         self.assertEqual(os.path.realpath(self.skill_link()),
-                         os.path.join(REPO, "skill", "sleep"))
+                         os.path.join(REPO, "shared-skill", "sleep"))
         self.assertTrue(os.path.isdir(self.sleep_home))
         self.assertEqual(len(glob.glob(self.settings_path + ".bak-*")), 1)
         if real_before is not None:
@@ -1474,7 +1474,7 @@ class NightlyJob(Sandbox):
         root = tempfile.mkdtemp(prefix="sleep-root-", dir=self.tmp)
         for rel in ("install.sh", "uninstall.sh", "sleep.py"):
             shutil.copy2(os.path.join(REPO, rel), os.path.join(root, rel))
-        for rel in ("launchd", "hooks", "tools", os.path.join("skill", "sleep")):
+        for rel in ("launchd", "hooks", "tools", os.path.join("shared-skill", "sleep")):
             dst = os.path.join(root, rel)
             os.makedirs(os.path.dirname(dst), exist_ok=True)
             shutil.copytree(os.path.join(REPO, rel), dst)

@@ -119,7 +119,7 @@ def skill_link():
         print("  existing %s kept aside" % target)
     if not RUN:
         print("  would: mkdir -p %s/skills" % CLAUDE_HOME)
-        print("  would: ln -sfn %s  %s" % (os.path.join(ROOT, "skill", "sleep"), target))
+        print("  would: ln -sfn %s  %s" % (os.path.join(ROOT, "shared-skill", "sleep"), target))
         return
     os.makedirs(os.path.join(CLAUDE_HOME, "skills"), exist_ok=True)
     if os.path.islink(target):
@@ -127,12 +127,12 @@ def skill_link():
     elif os.path.isdir(target):
         os.rename(target, target + ".bak-" + stamp())
     try:
-        os.symlink(os.path.join(ROOT, "skill", "sleep"), target, target_is_directory=True)
+        os.symlink(os.path.join(ROOT, "shared-skill", "sleep"), target, target_is_directory=True)
     except (OSError, NotImplementedError):
         # Windows without symlink privilege: fall back to a copy.
         shutil.rmtree(target, ignore_errors=True)
-        shutil.copytree(os.path.join(ROOT, "skill", "sleep"), target)
-    print("  %s -> %s  (shared skill root)" % (target, os.path.join(ROOT, "skill", "sleep")))
+        shutil.copytree(os.path.join(ROOT, "shared-skill", "sleep"), target)
+    print("  %s -> %s  (shared skill root)" % (target, os.path.join(ROOT, "shared-skill", "sleep")))
 
 
 def hooks():
