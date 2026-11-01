@@ -152,6 +152,42 @@ class T(unittest.TestCase):
         self.assertEqual(got3.get("rediscovered"), "2")
         self.assertEqual(got3.get("rediscovered_in"), "sess-a|sess-b|sess-c")
 
+    def test_doctor_flags_a_candidate_unrediscovered_for_weeks(self):
+        """The reviewer's decay idea, report-only: a provisional candidate whose last
+        activity (creation, or the latest rediscovery) is older than the stale window
+        is surfaced by doctor --stale as noise the queue keeps injecting, but it is
+        NOT dropped. A recently touched one stays silent."""
+        cdir = os.path.join(TMP, "candidates")
+        old = "2001-01-01T00:00:00+0300"   # far older than the 4-week window
+        recent = paths.now()               # touched now -> not stale
+        def seed(name, ts, **extra):
+            lines = {"id": name, "ts": ts, "source": "agent", "trust": "observed",
+                     "kind": "fact", "status": "provisional", "session": "s",
+                     "cwd": "/tmp", "tags": "", "evidence": "", "supersedes": "",
+                     "superseded_by": "", "redacted": "false", "notes": ""}
+            lines.update(extra)
+            text = "---\n" + "".join("%s: %s\n" % (k, v) for k, v in lines.items()) + "---\n" + name + "\n"
+            with open(os.path.join(cdir, name + ".md"), "w", encoding="utf-8") as fh:
+                fh.write(text)
+        seed("cold", old)
+        seed("warm", recent)
+        seed("silent-old", old, rediscovered="1", rediscovered_at="2001-01-01T00:00:00+0300")
+        seed("recent-rediscovery", recent, rediscovered="3", rediscovered_at=recent)
+        issues = store.doctor(memory_dir=TMP)
+        stale = [i for i in issues if i["issue"] == "stale-candidate-unrediscovered"]
+        ids = {i["id"] for i in stale}
+        self.assertIn("cold", ids)
+        self.assertIn("silent-old", ids)   # rediscovered once long ago, silent since
+        self.assertNotIn("warm", ids)
+        self.assertNotIn("recent-rediscovery", ids)
+        # report only: files untouched, nothing dropped
+        self.assertEqual(len([f for f in os.listdir(cdir) if f.endswith(".md")]), 4)
+        # a refused candidate is not part of the active queue and must not be flagged
+        seed("refused-old", old, status="refused")
+        issues2 = store.doctor(memory_dir=TMP)
+        stale2 = {i["id"] for i in issues2 if i["issue"] == "stale-candidate-unrediscovered"}
+        self.assertNotIn("refused-old", stale2)
+
     def test_refused_paraphrase_is_rejected_not_reborn(self):
         """The reviewer's replay concern: a refused idea coming back paraphrased in a
         later session must not become a fresh provisional for re-review. It is judged

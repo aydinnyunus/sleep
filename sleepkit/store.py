@@ -16,10 +16,29 @@ import os
 import re
 import shutil
 import time
+from datetime import datetime
 
 from . import paths, safety
 
 KINDS = ("fact", "preference", "procedure", "warning")
+
+# Doctor flags a provisional candidate as stale when its last activity (creation
+# or the most recent rediscovery) is older than this.
+STALE_CANDIDATE_WEEKS = 4.0
+
+
+def _hours_since(ts: str) -> float | None:
+    """Hours since an ISO timestamp written by paths.now(). Unparseable input
+    returns None, meaning 'no constraint' rather than 'flag everything'."""
+    if not ts:
+        return None
+    try:
+        dt = datetime.fromisoformat(ts)
+    except (ValueError, TypeError):
+        return None
+    if dt.tzinfo is None:
+        dt = dt.astimezone()
+    return (datetime.now(dt.tzinfo) - dt).total_seconds() / 3600.0
 
 IDX_BEGIN = "<!-- sleep:begin (managed by sleepctl; lines here are appended, never rewritten) -->"
 IDX_END = "<!-- sleep:end -->"
@@ -240,6 +259,7 @@ def _record_rediscovery(cid: str, session: str) -> str | None:
     n = int(meta.get("rediscovered", 0) or 0) + 1
     meta["rediscovered"] = str(n)
     meta["rediscovered_in"] = "|".join(sessions)
+    meta["rediscovered_at"] = paths.now()
     loc = paths.candidates_dir()
     if not os.path.isfile(os.path.join(loc, cid + ".md")):
         p = os.path.join(paths.archive_dir("candidates"), cid + ".md")
@@ -606,6 +626,19 @@ def doctor(memory_dir: str | None = None, targets: list[str] | None = None,
             if sim >= 0.75:
                 out.append({"issue": "near-duplicate-candidates",
                             "pair": [pool[i][0], pool[j][0]], "similarity": round(sim, 2)})
+    cutoff_hours = STALE_CANDIDATE_WEEKS * 7 * 24
+    for c in list_candidates():
+        if c.get("status") != "provisional":
+            continue
+        # Last activity = the most recent rediscovery if there was one, else the
+        # record's own creation ts. A provisional that is neither being promoted
+        # nor re-learned for weeks is noise the queue keeps injecting into every
+        # session's context, so the doctor surfaces it (report only, nothing drops).
+        last = c.get("rediscovered_at") or c.get("ts")
+        age_h = _hours_since(str(last)) if last else None
+        if age_h is not None and age_h >= cutoff_hours:
+            out.append({"issue": "stale-candidate-unrediscovered", "id": c["id"],
+                        "last_seen": str(last)[:10], "rediscovered": int(c.get("rediscovered", 0) or 0)})
     for cid, body in pool:
         for path, text in bodies.items():
             # MEMORY.md is the index: it restates every entry by design, so scoring

@@ -1438,6 +1438,24 @@ class ProjectAttribution(Sandbox):
                             for f in os.listdir(self.memory) if f.endswith(".md")))
         self.assertEqual(self.cli("doctor").stdout, "clean\n")
 
+    def test_doctor_flags_an_unrediscovered_old_candidate_report_only(self):
+        """The decay idea, report-only: a provisional candidate untouched (no promote,
+        no rediscovery) for weeks is surfaced by doctor as stale injection noise but is
+        never dropped. exit code stays 0, doctor reports."""
+        self.seed_candidate("cold", "the legacy gateway is being decommissioned",
+                            source="agent", trust="observed", cwd=self.proj_a)
+        got = self.cli("doctor")
+        self.assertEqual(got.returncode, 0, got.stderr)
+        self.assertIn("stale-candidate-unrediscovered (1)", got.stdout)
+        self.assertIn('"cold"', got.stdout)
+        # report only: the candidate file still exists, nothing was dropped
+        self.assertTrue(os.path.isfile(os.path.join(self.sleep_home, "candidates", "cold.md")))
+        issues = json.loads(self.cli("doctor", "--json").stdout)
+        stale = [i for i in issues if i["issue"] == "stale-candidate-unrediscovered"]
+        self.assertEqual(len(stale), 1, stale)
+        self.assertEqual(stale[0]["id"], "cold")
+        self.assertEqual(stale[0]["rediscovered"], 0)
+
 class NightlyJob(Sandbox):
     """The launchd step, tested as the shape of a job that runs with nobody watching.
 
