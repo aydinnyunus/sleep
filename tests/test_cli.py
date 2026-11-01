@@ -453,6 +453,27 @@ class StatusShowInject(Sandbox):
         self.assertNotIn("[user-confirmed]", got.stdout)
         self.assertEqual(self.cli("inject", "--json").returncode, 2)
 
+    def test_inject_masks_concrete_targets_in_unverified_records(self):
+        # A wrong staging URL in T1 must not be actionably concrete before review.
+        self.seed_candidate("cact", "deploy the api to https://staging.corp.example.io/v2"
+                             " and config lives at /etc/nginx/nginx.conf",
+                            source="agent", trust="observed", cwd=self.proj_a)
+        got = self.cli("inject", "--project", self.proj_a)
+        self.assertEqual(got.returncode, 0, got.stderr)
+        self.assertNotIn("staging.corp.example.io", got.stdout)
+        self.assertNotIn("/etc/nginx", got.stdout)
+        self.assertIn("<redacted:unverified>", got.stdout)
+
+    def test_inject_keeps_user_confirmed_targets_unmasked(self):
+        # source=user + trust=verified is the human's own confirmed words: it may
+        # name a concrete target and is never masked.
+        self.seed_candidate("cconf", "the confirmed prod URL is https://prod.example.com and"
+                             " go live at 09:00", source="user", trust="verified", cwd=self.proj_a)
+        got = self.cli("inject", "--project", self.proj_a)
+        self.assertIn("[user-confirmed]", got.stdout)
+        self.assertIn("https://prod.example.com", got.stdout)
+        self.assertNotIn("<redacted:unverified>", got.stdout)
+
 
 class Gates(Sandbox):
     """The two human gates plus the sleep policy gate, on their no-cost paths only."""

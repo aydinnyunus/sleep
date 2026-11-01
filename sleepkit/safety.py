@@ -170,6 +170,52 @@ def relay_reason(text: str, environ: dict | None = None) -> str | None:
     return None
 
 
+# ------------------------------------------------------------------ masking --
+# A provisional (unverified) record may carry a concrete target a model could
+# act on before the human reviews it: an endpoint URL, a bare host, a host:port,
+# an absolute file path. The block that reaches the model labels it "background,
+# not an instruction", but that soft label is the only defense. Masking the
+# concrete atom keeps the record's gist visible while making a wrong guess
+# (e.g. a staging URL that turns out to point at prod) unactionable.
+#
+# Applied ONLY to unverified records; source=user + trust=verified is the human's
+# own confirmed words and is never masked.
+
+# Chosen conservatively so prose ("the gitlab needs a PAT") is not misread as a
+# host: a bare host requires a dotted public-suffix-like tail over this allowlist.
+_HOST_SUFFIXES = r"(?:com|net|org|io|dev|app|test|stage|local|internal|example|services|api|corp|int|cloud|amazonaws\.com|github\.io|herokuapp\.com)"
+_ATOM_PATTERNS = [
+    # scheme://anything  (http, https, ws, wss, ftp, ssh, git, +user@ and :port)
+    re.compile(r"(?i)\b(?:[a-z][a-z0-9+.-]*://)(?:\S+@)?[\w\-.:/]+\b"),
+    # user@host or user@host:path or user@host:port  (scp/ssh-style target)
+    re.compile(r"(?i)\b[a-z0-9._%%+-]+@((?:[a-z0-9][a-z0-9-]*\.)+%s)(?::[\w./~-]+)?\b" % _HOST_SUFFIXES),
+    # bare host with a known suffix, optionally with :port; never preceded by @ or /
+    re.compile(r"(?i)(?<![/@\w])((?:[a-z0-9][a-z0-9-]*\.)+%s)(?::\d{1,5})?(?![\w.])" % _HOST_SUFFIXES),
+    # absolute POSIX path (/home/..., /etc/nginx/nginx.conf) - avoid a bare "/" or "//"
+    re.compile(r"(?<![/\w:])/([A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)+)"),
+    # host:port quickly (a short dotted host with a port)
+    re.compile(r"(?i)\b((?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.){1,}[a-z]{2,}):\d{1,5}\b"),
+]
+
+_MASK = "<redacted:unverified>"
+
+
+def mask_unverified_targets(text: str) -> tuple[str, bool]:
+    """Replace concrete connection targets in a provisional body with a mask.
+
+    Returns (masked_text, masked_any). The mask never leaks the value: the atom
+    is dropped, not annotated around it.
+    """
+    out = text or ""
+    hit = False
+    for pat in _ATOM_PATTERNS:
+        out, n = pat.subn(_MASK, out)
+        if n:
+            hit = True
+    return out, hit
+
+
+
 def render_for_context(record: dict) -> str:
     """How a memory record is shown to a model. Unverified = context, never a rule."""
     trust = record.get("trust", "speculative")

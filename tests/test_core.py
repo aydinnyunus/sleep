@@ -702,3 +702,42 @@ class HeadlessLogin(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class MaskUnverifiedTargets(unittest.TestCase):
+    """safety.mask_unverified_targets: concrete connection targets get masked,
+    prose and dotted version numbers do not."""
+
+    def mask(self, text):
+        from sleepkit import safety
+        out, hit = safety.mask_unverified_targets(text)
+        return out, hit
+
+    def test_masks_scheme_urls(self):
+        out, hit = self.mask("open https://stage.example.com/api now")
+        self.assertTrue(hit)
+        self.assertNotIn("stage.example.com", out)
+        self.assertIn("<redacted:unverified>", out)
+
+    def test_masks_bare_hosts_and_ports(self):
+        out, hit = self.mask("prod-cluster.example.dev:8443 is the target")
+        self.assertTrue(hit)
+        self.assertNotIn("prod-cluster", out)
+
+    def test_masks_scp_and_ssh_targets(self):
+        out, hit = self.mask("scp file.gz ops@backup.example.org:/data/")
+        self.assertTrue(hit)
+        self.assertNotIn("ops@backup.example.org", out)
+        self.assertNotIn("/data/", out)
+
+    def test_masks_absolute_paths(self):
+        out, hit = self.mask("the config is /etc/nginx/nginx.conf")
+        self.assertTrue(hit)
+        self.assertNotIn("/etc/nginx", out)
+
+    def test_leaves_plain_prose_and_versions_alone(self):
+        out, hit = self.mask("the internal gitlab needs a PAT with read_api scope")
+        self.assertFalse(hit)
+        self.assertEqual(out, "the internal gitlab needs a PAT with read_api scope")
+        out2, hit2 = self.mask("version 1.2.3 and 4.5.6 are released")
+        self.assertFalse(hit2)
