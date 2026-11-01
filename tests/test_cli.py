@@ -643,6 +643,34 @@ class Gates(Sandbox):
         self.assertEqual(self.read(os.path.join(self.memory, "MEMORY.md"))
                          .count("Rtk gain reports token savings"), 1)
 
+
+    def test_demote_unapproves_a_promoted_memory_and_surfaces_it_as_retracted_refused(self):
+        self.seed_candidate("cwel", "The gateway needs X-Route blue.", source="user",
+                            trust="verified", cwd=self.proj_a)
+        self.assertEqual(self.cli("promote", "cwel", "--memory-dir", self.memory).returncode, 0)
+        st = self.cli("status")
+        self.assertIn("permanent (last 5, promoted with review date + source):", st.stdout)
+        self.assertIn("X-Route blue", st.stdout)
+        # demote with a note
+        got = self.cli("demote", "cwel", "--memory-dir", self.memory,
+                       "--note", "gateway moved to prod")
+        self.assertEqual(got.returncode, 0, got.stdout + got.stderr)
+        self.assertIn("DEMOTED", got.stdout)
+        # status: no longer active permanent, but shows retracted
+        st2 = self.cli("status")
+        self.assertNotIn("permanent (last 5, promoted with review date + source):", st2.stdout)
+        self.assertIn("retracted (last 5, demoted; kept on record, not active memory):", st2.stdout)
+        self.assertIn("X-Route blue", st2.stdout)
+        self.assertIn("[demoted: gateway moved to prod]", st2.stdout)
+        # T2 canonical count no longer counts the retracted record
+        self.assertIn("(0 permanent records", st2.stdout)
+        # refused candidate is back and visible with its note
+        self.assertIn("refused", st2.stdout)
+        idx = self.read(os.path.join(self.memory, "MEMORY.md"))
+        self.assertNotIn("X-Route blue", idx)
+        # promote again now refuses (the record is refused, not promoted)
+        again = self.cli("promote", "cwel", "--memory-dir", self.memory)
+        self.assertNotEqual(again.returncode, 0)
     def test_refuse_records_the_verdict_and_keeps_the_record_out_of_t2(self):
         self.seed_candidate("cbad", "A fact that turned out to be wrong.", cwd=self.proj_a)
         before = sorted(os.listdir(self.memory))

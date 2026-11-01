@@ -176,6 +176,39 @@ class T(unittest.TestCase):
         # index line is not duplicated
         self.assertEqual(after.count("rtk gain reports token savings"), 1)
 
+    def test_demote_retracts_a_promoted_memory_and_reopens_it_as_refused(self):
+        _, cid = store.add_candidate("the staging gateway requires X-Route blue",
+                                     source="user", trust="verified")
+        ok, out = store.promote(cid, memory_dir=MEMORY)
+        self.assertTrue(ok, out)
+        # find the promoted T2 file and confirm it reads as promoted
+        perm = [f for f in os.listdir(MEMORY) if f.endswith(".md") and f != "MEMORY.md"]
+        self.assertEqual(len(perm), 1, perm)
+        t2 = os.path.join(MEMORY, perm[0])
+        meta, body = store.parse(open(t2, encoding="utf-8").read())
+        self.assertEqual(meta["status"], "promoted")
+        self.assertIn("X-Route blue", body)
+        # demote: retract the T2 copy, drop the index line, reopen the candidate as refused
+        ok2, out2 = store.demote(cid, memory_dir=MEMORY, note="gateway moved")
+        self.assertTrue(ok2, out2)
+        meta2, _ = store.parse(open(t2, encoding="utf-8").read())
+        self.assertEqual(meta2["status"], "retracted", "T2 copy must be marked, not deleted")
+        self.assertIn("retracted_at", meta2)
+        # index line gone
+        idx = open(os.path.join(MEMORY, "MEMORY.md"), encoding="utf-8").read()
+        self.assertNotIn("X-Route blue", idx)
+        # archived candidate is now refused, visible to status/refuse
+        ok3, why3 = store.demote(cid, memory_dir=MEMORY)
+        self.assertFalse(ok3)
+        self.assertIn("not promoted", why3)
+        got = store.get_candidate(cid)
+        self.assertIsNotNone(got)
+        self.assertEqual(got[0]["status"], "refused")
+        self.assertEqual(got[0].get("notes"), "gateway moved")
+        # clean up: this test promotes a real T2 file; remove it so the class
+        # stays order-independent (test_promote_is_expansion_only asserts 1 file)
+        os.remove(t2)
+
     def test_frontmatter_roundtrip(self):
         rec = {"id": "c1", "ts": "now", "source": "user", "trust": "verified",
                "kind": "preference", "status": "provisional", "tags": ["a", "b"]}

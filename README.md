@@ -241,6 +241,7 @@ Run the two dream components separately when you want more control:
 | `./sleep.py sleep --force` | Run consolidation now |
 | `./sleep.py show <id>` | Inspect a candidate and its rendered context |
 | `./sleep.py promote <id>` | Move an approved candidate to permanent memory |
+| `./sleep.py demote <id> --note "..."` | Un-approve a promoted memory: mark the approved record as retracted (kept on record, not deleted) and reopen the candidate as refused |
 | `./sleep.py refuse <id> --note "..."` | Record that a candidate is incorrect |
 | `./sleep.py replay --run --limit 3` | Compare selected tasks with memory off and on |
 | `./sleep.py mine --dry-run` | Find preferences repeated across sessions |

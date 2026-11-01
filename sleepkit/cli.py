@@ -69,11 +69,24 @@ def cmd_status(a) -> int:
     _p("T0 buffer      %d records / %d files / %d bytes  (captured while you worked)" % (bc["records"], bc["files"], bc["bytes"]))
     _p("T1 candidates  %d provisional, %d refused, %d total  (distilled, shown as unverified context)" % (len(prov), len(ref), len(cands)))
     _p("   quarantine  %d parked (needs human eyes)  (held out until you review)" % len(q))
-    _p("T2 canonical   %s  (%d permanent records; only you can promote)" % (mdir, len(permanent)))
-    if permanent:
+    retracted = []
+    act_perm = []
+    for f in permanent:
+        st_ = "?"
+        try:
+            with open(os.path.join(mdir, f), encoding="utf-8") as fh:
+                st_ = store.parse(fh.read())[0].get("status", "?")
+        except (OSError, ValueError):
+            st_ = "?"
+        if st_ == "retracted":
+            retracted.append(f)
+        else:
+            act_perm.append(f)
+    _p("T2 canonical   %s  (%d permanent records; only you can promote)" % (mdir, len(act_perm)))
+    if act_perm:
         _p("")
         _p("permanent (last 5, promoted with review date + source):")
-        for f in permanent[-5:]:
+        for f in act_perm[-5:]:
             try:
                 with open(os.path.join(mdir, f), encoding="utf-8") as fh:
                     m, b = store.parse(fh.read())
@@ -83,6 +96,21 @@ def cmd_status(a) -> int:
             src = m.get("source", "?")
             _p("  %-10s %-10s %-8s %s" % (f[:-3][:10], when, src,
                                            b.replace("\n", " ")[:88]))
+    if retracted:
+        _p("")
+        _p("retracted (last 5, demoted; kept on record, not active memory):")
+        for f in retracted[-5:]:
+            try:
+                with open(os.path.join(mdir, f), encoding="utf-8") as fh:
+                    m, b = store.parse(fh.read())
+            except (OSError, ValueError):
+                m, b = {}, ""
+            when = m.get("retracted_at", "?")[:10]
+            line = "  %-10s %-10s %s" % (f[:-3][:10], when,
+                                          b.replace("\n", " ")[:88])
+            if m.get("note"):
+                line += "  [demoted: %s]" % str(m["note"]).replace("\n", " ")[:120]
+            _p(line)
     if prov:
         _p("")
         _p("provisional (context only, never directives):")
@@ -129,6 +157,13 @@ def cmd_show(a) -> int:
 def cmd_promote(a) -> int:
     ok, out = store.promote(a.id, memory_dir=a.memory_dir, dry_run=a.dry_run)
     _p(("PROMOTED " if ok else "REFUSED ") + out)
+    return 0 if ok else 3
+
+
+def cmd_demote(a) -> int:
+    ok, out = store.demote(a.id, memory_dir=a.memory_dir, dry_run=a.dry_run,
+                           note=a.note)
+    _p(("DEMOTED " if ok else "REFUSED ") + out)
     return 0 if ok else 3
 
 
@@ -339,6 +374,13 @@ def main(argv=None) -> int:
     pr.add_argument("--memory-dir")
     pr.add_argument("--dry-run", action="store_true")
     pr.set_defaults(fn=cmd_promote)
+
+    dm = sub.add_parser("demote", help="un-approve a promoted memory (T2 -> refused, marked not deleted)")
+    dm.add_argument("id")
+    dm.add_argument("--memory-dir")
+    dm.add_argument("--note", default="")
+    dm.add_argument("--dry-run", action="store_true")
+    dm.set_defaults(fn=cmd_demote)
 
     rf = sub.add_parser("refuse", help="mark a candidate wrong, with a note")
     rf.add_argument("candidate_id")

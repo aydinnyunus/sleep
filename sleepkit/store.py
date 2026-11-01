@@ -308,7 +308,14 @@ def set_status(cid: str, status: str, extra: dict | None = None) -> bool:
     meta["reviewed"] = paths.now()
     for k, v in (extra or {}).items():
         meta[k] = v
-    with open(os.path.join(paths.candidates_dir(), cid + ".md"), "w", encoding="utf-8") as fh:
+    # Write back where the record actually lives: promoted candidates are in the
+    # archive, pending ones in candidates. Writing always to candidates used to
+    # leave a promoted record's status change stranded in a stale archive copy.
+    loc = paths.candidates_dir()
+    if meta.get("promoted_to") or not os.path.isfile(os.path.join(loc, cid + ".md")):
+        if os.path.isfile(os.path.join(paths.archive_dir("candidates"), cid + ".md")):
+            loc = paths.archive_dir("candidates")
+    with open(os.path.join(loc, cid + ".md"), "w", encoding="utf-8") as fh:
         fh.write(emit(meta, body))
     return True
 
@@ -400,6 +407,83 @@ def append_index_line(memory_dir: str, line: str) -> tuple[bool, str]:
     os.replace(tmp, idx)
     return True, "appended"
 
+
+def remove_index_line(memory_dir: str, line: str, slug: str) -> bool:
+    """Drop one managed index line by slug. Never touches content outside the block."""
+    idx = os.path.join(memory_dir, "MEMORY.md")
+    if not os.path.isfile(idx):
+        return False
+    with open(idx, encoding="utf-8") as fh:
+        existing = fh.read()
+    block_re = re.compile(re.escape(IDX_BEGIN) + r".*?" + re.escape(IDX_END), re.S)
+    m = block_re.search(existing)
+    if not m:
+        return False
+    block = m.group(0)
+    # Match any line whose "**<slug>**" heading equals ours, regardless of suffix.
+    target = "**%s**" % slug
+    kept, found = [], False
+    for ln in block.split("\n"):
+        if re.match(r"\s*- \*\*[^*]+\*\*:", ln) and target in ln:
+            found = True
+            continue
+        kept.append(ln)
+    if not found:
+        return False
+    new_block = "\n".join(kept)
+    updated = existing[:m.start()] + new_block + existing[m.end():]
+    with open(idx, "w", encoding="utf-8") as fh:
+        fh.write(updated)
+    return True
+
+
+def demote(cid: str, memory_dir: str | None = None, dry_run: bool = False,
+           note: str = "") -> tuple[bool, str]:
+    """T2 -> refused. Explicit human act: an approved memory turned out wrong.
+
+    Promotion was "create a new file, never edit one"; reversal keeps that spirit.
+    The canonical T2 copy is *marked* retracted, not deleted, so the audit trail of
+    what was once approved survives; the index line is dropped so the retired value
+    no longer reads as active memory; and the archived candidate is re-opened as a
+    refused record the reviewer can see in `status`. Nothing on this path edits or
+    deletes a past verdict.
+    """
+    got = get_candidate(cid)
+    if not got:
+        return False, "no such candidate: " + cid
+    meta, body = got
+    if meta.get("status") != "promoted":
+        return False, "not promoted (nothing to demote): " + cid
+    dest = meta.get("promoted_to") or ""
+    mdir = memory_dir or paths.memory_dir()
+    slug = os.path.basename(dest)[:-3] if dest else ""
+    if dry_run:
+        return True, "would retract %s (drop index line, mark candidate refused)" % (slug or cid)
+    stamp = paths.now()
+    # 1) mark the canonical T2 copy retracted
+    t2_ok = True
+    if dest and os.path.isfile(dest):
+        try:
+            with open(dest, encoding="utf-8") as fh:
+                m2, b2 = parse(fh.read())
+            m2["status"] = "retracted"
+            m2["retracted_at"] = stamp
+            if note:
+                m2["note"] = note
+            with open(dest, "w", encoding="utf-8") as fh:
+                fh.write(emit(m2, b2))
+        except (OSError, ValueError):
+            t2_ok = False
+    # 2) drop the index line so the retired value no longer reads as active
+    if slug and mdir:
+        remove_index_line(mdir, "", slug)
+    # 3) re-open the archived candidate as refused with a note the reviewer can see
+    if note:
+        set_status(cid, "refused", {"notes": note, "reviewed": stamp})
+    else:
+        set_status(cid, "refused", {"reviewed": stamp})
+    return True, ("retracted %s" % (slug or cid)
+                  + (" (T2 default not found)" if not t2_ok else ""))
 
 def supersede(old_id: str, new_id: str) -> bool:
     return (set_status(old_id, "superseded", {"superseded_by": new_id})
