@@ -27,6 +27,7 @@
   </array>
   <key>StartCalendarInterval</key>
   <dict><key>Hour</key><integer>3</integer><key>Minute</key><integer>41</integer></dict>
+  <key>RunAtLoad</key><true/>
   <key>StandardOutPath</key><string>__SLEEPHOME__/logs/nightly.log</string>
   <key>StandardErrorPath</key><string>__SLEEPHOME__/logs/nightly.log</string>
   <key>EnvironmentVariables</key>

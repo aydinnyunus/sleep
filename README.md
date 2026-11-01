@@ -46,12 +46,29 @@ Requirements:
 
 ```bash
 ./install.sh --dry-run     # show every change without writing
-./install.sh               # install the shared skill and Claude Code hooks
-./install.sh --extension   # also install the Pi/OmO extension
-./install.sh --launchd     # also schedule the nightly pass on macOS
+./install.sh               # install skill + hooks; asks whether to add the
+                           # nightly pass and the Pi/OmO extension (no flags needed)
+./install.sh --extension   # also install the Pi/OmO extension (no prompt)
+./install.sh --nightly     # also schedule the nightly pass (no prompt)
+./install.sh --launchd     # alias for --nightly (macOS convention)
 ```
 
-The installer runs the test suite first, creates backups before configuration changes, and is safe to run again.
+On Windows the entry point `./install.sh` becomes `python tools\install.py` (or
+`py tools\install.py`); the flags are identical:
+
+```bat
+py tools\install.py --dry-run
+py tools\install.py --extension --nightly
+```
+
+The installer runs the test suite first, creates backups before configuration
+changes, and is safe to run again. It is one Python script and works on macOS,
+Linux, and Windows; per-platform scheduling is chosen automatically:
+
+- **macOS** - a LaunchAgent (`~/Library/LaunchAgents/com.aydinnyunus.sleep-nightly.plist`).
+- **Linux** - a cron job (`crontab -l`, guarded by a `# aydinnyunus-sleep-nightly` marker).
+- **Windows** - a Task Scheduler task via `schtasks /create /tn aydinnyunus-sleep-nightly`.
+
 
 ### Pi / OmO extension
 
@@ -135,6 +152,8 @@ To remove Sleep and restore the backed-up configuration:
 ```bash
 ./uninstall.sh
 ```
+
+On Windows, `python tools\uninstall.py` (or `py tools\uninstall.py`).
 
 ## Quick start
 
@@ -360,7 +379,7 @@ Use `--force` only when you intentionally want a model call.
 
 **The scheduled pass cannot reach the model**
 
-Confirm that `~/.sleep/env` exists, has mode `0600`, and contains the same provider settings used by your interactive shell. Then run `./sleep.py sleep --force` before relying on launchd.
+Confirm that `~/.sleep/env` exists, has mode `0600`, and contains the same provider settings used by your interactive shell. Then run `./sleep.py sleep --force` before relying on the scheduled pass (launchd / cron / Task Scheduler).
 
 **A candidate appears in the wrong context**
 
