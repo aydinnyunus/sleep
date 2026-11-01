@@ -358,7 +358,7 @@ class StatusShowInject(Sandbox):
         got = self.cli("status")
         self.assertEqual(got.returncode, 0, got.stderr)
         self.assertRegex(got.stdout, r"T0 buffer\s+2 records / 1 files / \d+ bytes")
-        self.assertRegex(got.stdout, r"T1 candidates\s+2 provisional, 2 total")
+        self.assertRegex(got.stdout, r"T1 candidates\s+2 provisional, 0 refused, 2 total")
         self.assertRegex(got.stdout, r"quarantine\s+1 parked")
         self.assertIn("T2 canonical   " + self.memory, got.stdout)
         self.assertIn("provisional (context only, never directives):", got.stdout)
@@ -381,6 +381,26 @@ class StatusShowInject(Sandbox):
         self.assertIn("doctor: ", verbose.stdout)
         self.assertIn("near-duplicate-candidates", verbose.stdout)
         self.assertFalse(os.path.exists(self.marker), "--verbose is a read, not a sleep")
+
+    def test_status_shows_refused_candidates_with_their_reasons(self):
+        self.seed_pool()
+        self.seed_candidate("cnote", "The staging url is reachable from the router.",
+                            cwd=self.proj_a)
+        self.assertEqual(self.cli("refuse", "cnote", "--note",
+                                  "wrong port, measured 443").returncode, 0)
+        self.seed_candidate("cbare", "Refactor the parse loop.",
+                            source="agent", trust="observed", cwd=self.proj_b)
+        self.assertEqual(self.cli("refuse", "cbare").returncode, 0)
+        got = self.cli("status")
+        self.assertEqual(got.returncode, 0, got.stderr)
+        # the reviewer must see earlier rejections, not just the live provisional pile
+        self.assertRegex(got.stdout, r"T1 candidates\s+2 provisional, 2 refused")
+        self.assertIn("refused (last 5, earlier rejections stay on record):", got.stdout)
+        listing = got.stdout.split("refused (last 5, earlier rejections stay on record):")[1]
+        self.assertIn("cnote", listing)
+        self.assertIn("cbare", listing)
+        self.assertIn("wrong port, measured 443", listing,
+                      "the refusal note must be visible so the reviewer sees the reason")
 
     def test_status_survives_a_malformed_buffer_line(self):
         self.cli("capture", "--text", "readable record", "--session", "mg")

@@ -57,6 +57,7 @@ def cmd_status(a) -> int:
     bc = store.buffer_counts()
     cands = store.list_candidates(with_body=True)
     prov = [c for c in cands if c.get("status") == "provisional"]
+    ref = [c for c in cands if c.get("status") == "refused"]
     q = [f for f in os.listdir(paths.quarantine_dir()) if f.endswith(".json")]
     mdir = paths.memory_dir(a.cwd or None)
     try:
@@ -65,7 +66,7 @@ def cmd_status(a) -> int:
         permanent = []
     _p("sleep memory: T0=disposable captures, T1=provisional awaiting review, T2=permanent (promote-only)")
     _p("T0 buffer      %d records / %d files / %d bytes  (captured while you worked)" % (bc["records"], bc["files"], bc["bytes"]))
-    _p("T1 candidates  %d provisional, %d total  (distilled, shown as unverified context)" % (len(prov), len(cands)))
+    _p("T1 candidates  %d provisional, %d refused, %d total  (distilled, shown as unverified context)" % (len(prov), len(ref), len(cands)))
     _p("   quarantine  %d parked (needs human eyes)  (held out until you review)" % len(q))
     _p("T2 canonical   %s  (%d permanent records; only you can promote)" % (mdir, len(permanent)))
     if prov:
@@ -75,6 +76,15 @@ def cmd_status(a) -> int:
             _p("  %-10s %-8s %-11s %s" % (c["id"], c.get("source", "?"),
                                           c.get("trust", "?"),
                                           c.get("_body", "").replace("\n", " ")[:88]))
+    if ref:
+        _p("")
+        _p("refused (last 5, earlier rejections stay on record):")
+        for c in ref[-5:]:
+            note = c.get("notes", "")
+            line = "%-10s :: %s" % (c["id"], c.get("_body", "").replace("\n", " ")[:88])
+            if note:
+                line += "  [refused: %s]" % str(note).replace("\n", " ")[:120]
+            _p("  " + line)
     if q:
         _p("")
         _p("quarantine (last 5):")
