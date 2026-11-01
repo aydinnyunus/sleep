@@ -1304,6 +1304,34 @@ class ProjectAttribution(Sandbox):
         # The buffer was consumed (pruned) because the passes produced proposals.
         self.assertEqual(len(self.buffer_records()), 0)
 
+    def test_refused_memory_coming_back_paraphrased_reburns_nothing(self):
+        """The reviewer's replay case, run end to end: a consolidation pass whose
+        model proposes a paraphrase of an already-refused idea must not file a fresh
+        provisional candidate. The refusal holds and the reviewer still sees it."""
+        # One session feeds the buffer so the pass has a batch to consolidate.
+        self.cli("capture", "--text", "We saw the staging box time out on a big pull.",
+                 "--source", "user", "--cwd", self.proj_a, "--session", "replay1")
+        # An earlier run already proposed the same idea and it was refused.
+        self.seed_candidate("cref", "The staging box needs the 90s curl timeout.",
+                            source="agent", trust="observed", cwd=self.proj_a)
+        self.assertEqual(self.cli("refuse", "cref", "--note",
+                                  "staging is disabled, timeout irrelevant").returncode, 0)
+        # Later session, model paraphrases that refused idea.
+        paraphrase = "Staging times out and needs a longer curl timeout configured."
+        ran = self.cli("sleep", "--min-records", "1", "--min-interval", "0",
+                       cwd=self.home, CLAUDE_BIN=self.proposal_claude(),
+                       SLEEP_FAKE_PROPOSAL=paraphrase)
+        self.assertEqual(ran.returncode, 0, ran.stdout + ran.stderr)
+        doc = json.loads(ran.stdout)
+        self.assertEqual(doc["accepted"], 0, doc)
+        # The refused candidate is the only candidate left; no fresh provisional was born.
+        left = os.listdir(os.path.join(self.sleep_home, "candidates"))
+        self.assertEqual(left, ["cref.md"], left)
+        # The reviewer can still see the earlier rejection and its reason.
+        got = self.cli("status")
+        self.assertRegex(got.stdout, r"T1 candidates\s+0 provisional, 1 refused")
+        self.assertIn("staging is disabled, timeout irrelevant", got.stdout)
+
     def test_a_hand_dropped_proposal_follows_the_batch_that_ingested_it(self):
         # pending/ carries no observation of its own, so it has no say. The pass that
         # reads it is consolidating one project's buffer, so the file is filed with

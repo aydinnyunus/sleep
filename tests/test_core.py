@@ -110,6 +110,43 @@ class T(unittest.TestCase):
         self.assertFalse(ok2)
         self.assertIn("duplicate of", why)
 
+    def test_refused_paraphrase_is_rejected_not_reborn(self):
+        """The reviewer's replay concern: a refused idea coming back paraphrased in a
+        later session must not become a fresh provisional for re-review. It is judged
+        and rejected again, with the earlier refusal named."""
+        ok, cid = store.add_candidate(
+            "The staging url is reachable directly from the production router.",
+            kind="fact", source="agent", trust="observed", cwd="/tmp/proj")
+        self.assertTrue(ok, cid)
+        self.assertTrue(store.set_status(cid, "refused", {"notes": "wrong port"}))
+        for paraphrase in (
+            "The staging endpoint can be reached straight from the production router.",
+            "A staging host is reachable from the router and we remeasured the port.",
+            "You can hit staging straight from the production router.",
+        ):
+            ok2, why = store.add_candidate(
+                paraphrase, kind="fact", source="agent", trust="observed", cwd="/tmp/proj")
+            self.assertFalse(ok2, "%r must not reborn as a provisional" % paraphrase)
+            self.assertIn("earlier refusal", why)
+            self.assertIn(cid, why)
+        # nothing new was filed; only the original refused candidate remains
+        cands = store.list_candidates()
+        self.assertEqual([c.get("status") for c in cands], ["refused"])
+
+    def test_refused_lock_keeps_a_different_fact_about_the_same_system(self):
+        """The bar must be paraphrase-tight, not topic-blocking: another, distinct
+        fact about the same routers is a new piece of memory, not a repeat."""
+        ok, cid = store.add_candidate(
+            "The staging url is reachable directly from the production router.",
+            kind="fact", source="agent", trust="observed", cwd="/tmp/proj")
+        self.assertTrue(ok, cid)
+        self.assertTrue(store.set_status(cid, "refused", {"notes": "wrong port"}))
+        ok2, cid2 = store.add_candidate(
+            "The production and staging routers share a single failover policy.",
+            kind="fact", source="agent", trust="observed", cwd="/tmp/proj")
+        self.assertTrue(ok2, "a different fact about the same subject must sail through")
+        self.assertEqual(len(store.list_candidates()), 2)
+
     def test_candidate_speculative_cannot_be_promoted(self):
         _, cid = store.add_candidate("maybe the flaky test is a race", source="inferred",
                                      trust="speculative")

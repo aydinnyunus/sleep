@@ -146,11 +146,28 @@ def buffer_counts() -> dict:
 
 
 # ------------------------------------------------------- similarity/dedup ---
+
+# A proposal that paraphrases an already-refused candidate must not reborn as a
+# fresh provisional idea the reviewer then judges all over again. Token-set
+# Jaccard (the general duplicate bar) falls off too fast to catch even a close
+# restate, so against a *refused* idea we compare by character bigrams, which
+# tolerate synonym swaps and reordering, and block on a lower bar. The idea was
+# already judged and rejected, so colliding with it should refuse the write.
+REFUSED_DUP_THRESHOLD = 0.42
+
 _WORD = re.compile(r"[a-z0-9_]+")
 
 
 def _tokens(text: str) -> set:
     return set(_WORD.findall((text or "").lower()))
+
+
+def _bigrams(text: str) -> set:
+    """Character bigrams of the lowercased text, for paraphrase-resistant
+    similarity. A pair of observations that differ only in wording shares most
+    bigrams, where token Jaccard already diverged."""
+    t = (text or "").lower()
+    return set(t[i:i + 2] for i in range(len(t) - 1))
 
 
 def similarity(a: str, b: str) -> float:
@@ -166,6 +183,32 @@ def nearest(text: str, pool: list[tuple[str, str]], threshold: float = 0.6) -> t
         s = similarity(text, other)
         if s > score:
             best, score = ident, s
+    return (best, score) if score >= threshold else ("", score)
+
+
+def ngram_similarity(a: str, b: str) -> float:
+    ga, gb = _bigrams(a), _bigrams(b)
+    if not ga or not gb:
+        return 0.0
+    return len(ga & gb) / float(len(ga | gb))
+
+
+def refused_collision(text: str, threshold: float = REFUSED_DUP_THRESHOLD) -> tuple[str, float]:
+    """Best matching already-refused candidate body, or ("", 0.0) under threshold.
+
+    Refusals are the one class we hard-block aggressively: the idea was judged and
+    rejected, so coming back paraphrased must not become a new provisional review.
+    Bigram Jaccard separates a restate of the same fact from a different fact about
+    the same subject far better than token Jaccard on short observations, which is
+    why this gate uses it instead of similarity().
+    """
+    best, score = "", 0.0
+    for m in list_candidates(with_body=True):
+        if m.get("status") != "refused":
+            continue
+        s = ngram_similarity(text, m.get("_body", ""))
+        if s > score:
+            best, score = m["id"], s
     return (best, score) if score >= threshold else ("", score)
 
 
@@ -196,6 +239,10 @@ def add_candidate(text: str, kind: str = "fact", source: str = "agent",
     if dup:
         return False, "duplicate of %s (%.2f); use `sleepctl supersede %s %s`" % (
             dup, score, dup, "new-text")
+    ref_id, ref_score = refused_collision(red)
+    if ref_id:
+        return False, "duplicate of earlier refusal %s (%.2f); this idea was judged and rejected" % (
+            ref_id, ref_score)
 
     rec = {
         "id": paths.new_id("c"),
