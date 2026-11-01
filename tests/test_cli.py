@@ -1231,7 +1231,10 @@ class ProjectAttribution(Sandbox):
         self.assertNotIn("rtk proxy", self.cli("inject", "--project", self.proj_b,
                                                cwd=self.home).stdout)
 
-    def test_a_mixed_project_batch_fails_closed(self):
+    def test_a_mixed_project_batch_consolidates_each_project_separately(self):
+        # Two projects' truths stay separate: each gets its own consolidation pass,
+        # and each candidate is filed under the project its records came from. The
+        # whole buffer is consumed because both passes produced proposals.
         self.cli("capture", "--text", "Project A private routing fact.", "--source", "user",
                  "--cwd", self.proj_a, "--session", "mixed-a")
         self.cli("capture", "--text", "Project B private routing fact.", "--source", "user",
@@ -1239,12 +1242,26 @@ class ProjectAttribution(Sandbox):
         ran = self.cli("sleep", "--min-records", "2", "--min-interval", "0",
                        cwd=self.home, CLAUDE_BIN=self.proposal_claude(),
                        SLEEP_FAKE_PROPOSAL=self.BODY)
-        self.assertEqual(ran.returncode, 3, ran.stdout + ran.stderr)
+        self.assertEqual(ran.returncode, 0, ran.stdout + ran.stderr)
         doc = json.loads(ran.stdout)
-        self.assertFalse(doc["ok"])
-        self.assertIn("mixed-project buffer", doc["reason"])
-        self.assertEqual(len(self.buffer_records()), 2)
-        self.assertEqual(os.listdir(os.path.join(self.sleep_home, "candidates")), [])
+        self.assertTrue(doc["ok"], doc)
+        # The mixed buffer no longer fails closed: both projects got a pass.
+        self.assertEqual(len(doc.get("per_project", [])), 2, doc)
+        self.assertEqual(doc["unaddressed"], 0, doc)
+        self.assertEqual(doc["proposals"], 2, doc)
+        # Both passes proposed the SAME fixed fake text, so the global duplicate
+        # gate admits one and refuses the other as a duplicate. What matters here
+        # is that each pass ran and filed under its own project, not that identical
+        # text is stored twice.
+        self.assertEqual(doc["accepted"], 1, doc)
+        cid = doc["accepted_ids"][0]
+        on_disk = self.read(os.path.join(self.sleep_home, "candidates", cid + ".md"))
+        self.assertIn("rtk proxy", on_disk)
+        self.assertIn("source: agent", on_disk)
+        self.assertIn("cwd: %s" % self.proj_a, on_disk,
+                      "the surviving candidate must be filed under project A")
+        # The buffer was consumed (pruned) because the passes produced proposals.
+        self.assertEqual(len(self.buffer_records()), 0)
 
     def test_a_hand_dropped_proposal_follows_the_batch_that_ingested_it(self):
         # pending/ carries no observation of its own, so it has no say. The pass that

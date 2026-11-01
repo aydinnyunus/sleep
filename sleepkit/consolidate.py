@@ -72,27 +72,34 @@ def buffer_cwd(records: list) -> str:
     return addresses[0][0] if addresses else ""
 
 
-def distill(session: str | None = None, model: str | None = None,
-            budget: float = 0.5, prompt_file: str | None = None,
-            dry_run: bool = False) -> dict:
-    model = llm.resolve_model(model)
-    recs = store.read_buffer(session)
-    if not recs:
-        return {"ok": True, "reason": "buffer empty", "proposals": 0, "accepted": 0,
-                "consumed": False}
-    projects = buffer_projects(recs)
-    if len(projects) > 1:
-        return {"ok": False, "reason": "mixed-project buffer; consolidate one session at a time",
-                "projects": projects, "buffer_records": len(recs), "proposals": 0,
-                "accepted": 0, "refused": [], "accepted_ids": [], "llm_exit": None,
-                "consumed": False}
-    if dry_run:
-        return {"ok": True, "dry_run": True, "buffer_records": len(recs),
-                "would_send": _fmt_buffer(recs)[:2000]}
-    # One address for the whole batch, taken from the observations and not from this
-    # process: filing a candidate at the consolidator's own cwd files it where no
-    # session that produced it will ever look. See buffer_cwd().
-    origin = buffer_cwd(recs)
+def _project_groups(records: list) -> tuple:
+    """Split the buffer into (projects, unaddressed).
+
+    Each project is (recorded_cwd, [records]): records are grouped by their
+    canonical project address, but the recorded spelling is kept for filing,
+    because on macOS realpath adds a `/private` prefix that would otherwise make
+    the address unreachable. Records with no cwd (or a root cwd) carry no project
+    address and are returned separately: they cannot be filed somewhere a session
+    will look, so they are left in the buffer rather than dangerously filed.
+    """
+    groups = {}
+    unaddressed = []
+    for rec in records:
+        cwd = (rec.get("cwd") or "").strip()
+        if not cwd or os.path.abspath(cwd) == os.path.sep:
+            unaddressed.append(rec)
+            continue
+        address = os.path.normpath(os.path.abspath(cwd))
+        key = os.path.realpath(os.path.abspath(cwd))
+        if key not in groups:
+            groups[key] = (address, [])
+        groups[key][1].append(rec)
+    return list(groups.values()), unaddressed
+
+
+def _consolidate_project(recs, origin, session, model, budget, prompt_file) -> dict:
+    """One consolidation pass over a single project's records: the model proposes,
+    Python gates, and candidates are filed under that project's recorded cwd."""
     pf = prompt_file or os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                                      "prompts", "consolidate.md")
     user = (
@@ -124,11 +131,60 @@ def distill(session: str | None = None, model: str | None = None,
     # The tail lands in state.json, where it outlives the night. Redact on the way in:
     # a model that echoes back a credential must not have it filed in plain text.
     ing["llm_tail"] = safety.redact((res["stdout"] or "")[-400:])[0]
-    ing["buffer_records"] = len(recs)
-    # "consumed" is what entitles a sleep to prune: the pass produced proposals.
     ing["consumed"] = bool(res["exit"] == 0 and ing["proposals"])
     if res["exit"] != 0:
         ing["ok"] = False
+    return ing
+
+
+def distill(session: str | None = None, model: str | None = None,
+            budget: float = 0.5, prompt_file: str | None = None,
+            dry_run: bool = False) -> dict:
+    model = llm.resolve_model(model)
+    recs = store.read_buffer(session)
+    if not recs:
+        return {"ok": True, "reason": "buffer empty", "proposals": 0, "accepted": 0,
+                "consumed": False}
+    projects, unaddressed = _project_groups(recs)
+    if dry_run:
+        return {"ok": True, "dry_run": True, "buffer_records": len(recs),
+                "projects": [o for o, _ in projects], "unaddressed": len(unaddressed),
+                "would_send": _fmt_buffer(recs)[:2000]}
+    if not projects:
+        return {"ok": False, "reason": "no project address in buffer",
+                "buffer_records": len(recs), "proposals": 0, "accepted": 0,
+                "refused": [], "accepted_ids": [], "llm_exit": None, "consumed": False}
+    # One consolidation pass per project, each filed under that project's own recorded
+    # cwd. A mixed buffer used to fail closed because a single `origin` cannot be both
+    # projects; running per-project lets each project's truths land where their own
+    # sessions will look, and unaddressed records stay in the buffer (never pruned).
+    if len(projects) == 1:
+        ing = _consolidate_project(projects[0][1], projects[0][0], session,
+                                   model, budget, prompt_file)
+    else:
+        ing = {"ok": True, "proposals": 0, "accepted": 0, "refused": [],
+               "accepted_ids": [], "llm_exit": None, "consumed": False,
+               "per_project": []}
+        any_bad = False
+        for origin, recs_proj in projects:
+            sub = _consolidate_project(recs_proj, origin, session, model, budget,
+                                       prompt_file)
+            sub["origin"] = origin
+            sub["buffer_records"] = len(recs_proj)
+            ing["per_project"].append(sub)
+            ing["proposals"] += sub["proposals"]
+            ing["accepted"] += sub["accepted"]
+            ing["refused"] += sub["refused"]
+            ing["accepted_ids"] += sub["accepted_ids"]
+            if sub.get("llm_exit") != 0:
+                any_bad = True
+            ing["consumed"] = ing["consumed"] or sub["consumed"]
+        if any_bad:
+            ing["ok"] = False
+    ing["buffer_records"] = len(recs)
+    ing["unaddressed"] = len(unaddressed)
+    # "consumed" is what entitles a sleep to prune: the pass produced proposals.
+    # Unaddressed records were never read by any pass, so they must not be pruned.
     return ing
 
 
