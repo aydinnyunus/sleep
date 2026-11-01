@@ -368,6 +368,7 @@ Run `./sleep.py show <id>` and check its `cwd`. Mixed-project batches are kept i
 
 ## More documentation
 
+- [Sleep: the reviewable-memory extension for coding agents](https://aydinnyunus.github.io/2026/11/01/sleep-agent-memory-extension/) (blog)
 - [Measured evidence and validation history](docs/EVIDENCE.md)
 - [Sleep Framework analysis](sleep-framework.md)
 - [Shared `/sleep` skill](skill/sleep/SKILL.md)
