@@ -16,7 +16,11 @@ Capture while agents work. Consolidate when they stop. Promote only what you app
 Sleep adds a reviewable memory cycle to Pi, OmO, and Claude Code. It records useful observations during a session, turns them into provisional memory after the session, and keeps permanent memory behind an explicit human approval step.
 
 <p align="center">
-  <img src=".github/assets/sleep-replay.png" alt="Sleep CLI showing provisional memory improving a replay result" width="920" />
+  <img src=".github/assets/sleep-replay.png" alt="Terminal showing the sleep cycle: agents capture observations, sleep consolidates them into provisional memory, and only your promote makes them permanent" width="920" />
+</p>
+
+<p align="center">
+<em>The whole loop in one screen: agents write disposable captures (T0) while they work, <code>sleep</code> distills them into provisional memory (T1) that your next session can use, and nothing becomes permanent (T2) until you run <code>promote</code>.</em>
 </p>
 
 ## What you get

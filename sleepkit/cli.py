@@ -59,10 +59,15 @@ def cmd_status(a) -> int:
     prov = [c for c in cands if c.get("status") == "provisional"]
     q = [f for f in os.listdir(paths.quarantine_dir()) if f.endswith(".json")]
     mdir = paths.memory_dir(a.cwd or None)
-    _p("T0 buffer      %d records / %d files / %d bytes" % (bc["records"], bc["files"], bc["bytes"]))
-    _p("T1 candidates  %d provisional, %d total" % (len(prov), len(cands)))
-    _p("   quarantine  %d parked (needs human eyes)" % len(q))
-    _p("T2 canonical   %s" % mdir)
+    try:
+        permanent = [f for f in os.listdir(mdir) if f.endswith(".md")]
+    except OSError:
+        permanent = []
+    _p("sleep memory: T0=disposable captures, T1=provisional awaiting review, T2=permanent (promote-only)")
+    _p("T0 buffer      %d records / %d files / %d bytes  (captured while you worked)" % (bc["records"], bc["files"], bc["bytes"]))
+    _p("T1 candidates  %d provisional, %d total  (distilled, shown as unverified context)" % (len(prov), len(cands)))
+    _p("   quarantine  %d parked (needs human eyes)  (held out until you review)" % len(q))
+    _p("T2 canonical   %s  (%d permanent records; only you can promote)" % (mdir, len(permanent)))
     if prov:
         _p("")
         _p("provisional (context only, never directives):")
