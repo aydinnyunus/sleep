@@ -25,8 +25,12 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+      # Pin ruff to the version the repo is validated against. `ruff` unpinned
+      # tracks the latest on PyPI, whose default rule set can grow (e.g. UP031
+      # percent-format) and break CI on a passing tree. bump this in lockstep
+      # with the local checkout.
       - name: Install ruff (lint dependency)
-        run: pip install ruff
+        run: pip install ruff==0.15.13
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
