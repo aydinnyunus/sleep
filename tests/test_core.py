@@ -778,3 +778,20 @@ class MaskUnverifiedTargets(unittest.TestCase):
         self.assertEqual(out, "the internal gitlab needs a PAT with read_api scope")
         out2, hit2 = self.mask("version 1.2.3 and 4.5.6 are released")
         self.assertFalse(hit2)
+
+    def test_doctor_needle_flags_approved_memory_holding_a_stale_value(self):
+        mdir = os.path.join(TMP, "stale-mem")
+        os.makedirs(mdir, exist_ok=True)
+        with open(os.path.join(mdir, "deploy.md"), "w", encoding="utf-8") as fh:
+            fh.write("---\nstatus: promoted\n---\nDashboard lives at "
+                     "https://staging.example.com/app.\n")
+        with open(os.path.join(mdir, "other.md"), "w", encoding="utf-8") as fh:
+            fh.write("---\nstatus: promoted\n---\nRtk proxy is fine.\n")
+        issues = store.doctor(memory_dir=mdir, needle="staging.example.com")
+        stale = [i for i in issues if i["issue"] == "stale-value-in-memory"]
+        self.assertEqual(len(stale), 1, stale)
+        self.assertTrue(stale[0]["file"].endswith("deploy.md"), stale[0]["file"])
+        self.assertEqual(stale[0]["value"], "staging.example.com")
+        # read-only: files untouched
+        with open(os.path.join(mdir, "deploy.md")) as fh:
+            self.assertEqual(fh.read().count("staging.example.com"), 1)

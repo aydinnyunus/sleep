@@ -61,7 +61,8 @@ def cmd_status(a) -> int:
     q = [f for f in os.listdir(paths.quarantine_dir()) if f.endswith(".json")]
     mdir = paths.memory_dir(a.cwd or None)
     try:
-        permanent = [f for f in os.listdir(mdir) if f.endswith(".md")]
+        permanent = [f for f in os.listdir(mdir)
+                    if f.endswith(".md") and f != "MEMORY.md"]
     except OSError:
         permanent = []
     _p("sleep memory: T0=disposable captures, T1=provisional awaiting review, T2=permanent (promote-only)")
@@ -69,6 +70,19 @@ def cmd_status(a) -> int:
     _p("T1 candidates  %d provisional, %d refused, %d total  (distilled, shown as unverified context)" % (len(prov), len(ref), len(cands)))
     _p("   quarantine  %d parked (needs human eyes)  (held out until you review)" % len(q))
     _p("T2 canonical   %s  (%d permanent records; only you can promote)" % (mdir, len(permanent)))
+    if permanent:
+        _p("")
+        _p("permanent (last 5, promoted with review date + source):")
+        for f in permanent[-5:]:
+            try:
+                with open(os.path.join(mdir, f), encoding="utf-8") as fh:
+                    m, b = store.parse(fh.read())
+            except (OSError, ValueError):
+                m, b = {}, ""
+            when = m.get("promoted_at", "?")[:10]
+            src = m.get("source", "?")
+            _p("  %-10s %-10s %-8s %s" % (f[:-3][:10], when, src,
+                                           b.replace("\n", " ")[:88]))
     if prov:
         _p("")
         _p("provisional (context only, never directives):")
@@ -140,7 +154,7 @@ def cmd_prune(a) -> int:
 
 
 def cmd_doctor(a) -> int:
-    issues = store.doctor()
+    issues = store.doctor(needle=a.stale)
     if a.json:
         _p(json.dumps(issues, indent=2, sort_keys=True, default=str))
     elif not issues:
@@ -206,6 +220,10 @@ def cmd_nightly(a) -> int:
     rep: dict = {"ts": paths.now()}   # heterogeneous on purpose: three reports, one JSON
     rep["mine"] = ({"skipped": "--no-mine"} if a.no_mine
                    else mine.mine(min_sessions=a.mine_min_sessions, dry_run=a.dry_run))
+    # The hygiene report lands in the night regardless of the gates: it is
+    # read-only, so the worst an unattended pass can do is surface a stale
+    # value (e.g. a changed deployment URL) for a person to act on later.
+    rep["doctor"] = {"issues": store.doctor(needle=a.stale)}
     rep["sleep"] = consolidate.run_sleep(session=a.session, model=a.model,
                                          budget_usd=a.budget,
                                          min_records=a.min_records,
@@ -339,6 +357,9 @@ def main(argv=None) -> int:
 
     dc = sub.add_parser("doctor", help="read-only hygiene report")
     dc.add_argument("--json", action="store_true")
+    dc.add_argument("--stale", default=None,
+                    help="value (e.g. a URL) to scan approved T2 memory for; "
+                         "reports which permanent records still hold it")
     dc.set_defaults(fn=cmd_doctor)
 
     rp = sub.add_parser("replay", help="layer 3: A/B measure provisional memory, report-only")
@@ -352,6 +373,8 @@ def main(argv=None) -> int:
 
     nt = sub.add_parser("nightly",
                         help="unattended pass: gated consolidation + replay when due")
+    nt.add_argument("--stale", default=None,
+                    help="value (e.g. a URL) to scan approved T2 memory for each night")
     nt.add_argument("--session")
     nt.add_argument("--model", default=None)
     nt.add_argument("--budget", type=float, default=1.00)

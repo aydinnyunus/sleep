@@ -494,6 +494,16 @@ class StatusShowInject(Sandbox):
         self.assertIn("https://prod.example.com", got.stdout)
         self.assertNotIn("<redacted:unverified>", got.stdout)
 
+    def test_status_lists_permanent_with_review_date_and_source(self):
+        self.seed_candidate("curl", "The deploy URL is https://stage.internal:8080/app.",
+                            source="user", trust="verified", cwd=self.proj_b)
+        self.assertEqual(self.cli("promote", "curl", "--memory-dir", self.memory).returncode, 0)
+        got = self.cli("status")
+        self.assertIn("permanent (last 5, promoted with review date + source):", got.stdout)
+        self.assertRegex(got.stdout, r"the-depl\S*\s+\d{4}-\d{2}-\d{2}\s+user",
+                         "the T2 listing must show slug then promoted date and source")
+        self.assertNotIn("\n  MEMORY ",
+                         got.stdout, "the MEMORY.md index must not appear as a permanent record")
 
 class Gates(Sandbox):
     """The two human gates plus the sleep policy gate, on their no-cost paths only."""
@@ -619,6 +629,8 @@ class Gates(Sandbox):
         self.assertIn("<!-- sleep:begin", index)
         self.assertIn("<!-- sleep:end -->", index)
         self.assertEqual(index.count("Rtk gain reports token savings"), 1)
+        self.assertRegex(index, r"_\(promoted \d{4}-\d{2}-\d{2}, source=\S+\)_",
+                         "the index line must carry the review date and source")
         self.assertFalse(os.path.exists(os.path.join(self.sleep_home, "candidates", "cgood.md")))
         archived = os.path.join(self.sleep_home, "archive", "candidates", "cgood.md")
         self.assertIn("status: promoted", self.read(archived))
@@ -1190,6 +1202,22 @@ class Unattended(Sandbox):
         self.assertEqual(self.tree_state(self.memory), t2_before,
                          "an unattended pass must not write to T2")
 
+    def test_nightly_runs_the_higiene_doctor_into_the_report(self):
+        # a stale deployment URL in an approved record must surface in the night report
+        self.write(os.path.join(self.memory, "deploy.md"),
+                   "---\nstatus: promoted\n---\nDashboard lives at "
+                   "https://stage.internal:8080/app.\n")
+        res = self.cli("nightly", "--dry-run", "--stale", "stage.internal")
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        doc = json.loads(res.stdout)
+        self.assertIn("doctor", doc)
+        issues = doc["doctor"]["issues"]
+        stale = [i for i in issues if i["issue"] == "stale-value-in-memory"]
+        self.assertEqual(len(stale), 1, issues)
+        self.assertTrue(stale[0]["file"].endswith("deploy.md"), stale[0]["file"])
+        # an unattended pass adds hygiene findings but still never writes to T2
+        self.assertIn("sleep", doc)
+
     def test_nightly_stamps_the_replay_clock_and_then_waits(self):
         args = ("nightly", "--min-records", "99", "--replay-tasks", self.tasks_file(),
                 "--replay-limit", "1", "--replay-interval", "168")
@@ -1353,6 +1381,18 @@ class ProjectAttribution(Sandbox):
             if c.startswith("cwd: ")]
         self.assertEqual(pending_row, ["cwd: %s" % self.proj_a])
 
+    def test_doctor_stale_reports_approved_memory_still_holding_a_url(self):
+        self.seed_candidate("curl", "The deploy URL is https://stage.internal:8080/app.",
+                            source="user", trust="verified", cwd=self.proj_a)
+        self.assertEqual(self.cli("promote", "curl", "--memory-dir", self.memory).returncode, 0)
+        got = self.cli("doctor", "--stale", "stage.internal")
+        self.assertEqual(got.returncode, 0, got.stderr)
+        self.assertIn("stale-value-in-memory (1)", got.stdout)
+        self.assertIn("stage.internal", got.stdout)
+        # matching the approved record did not mutate the store
+        self.assertTrue(any(f.startswith("the-deploy-url")
+                            for f in os.listdir(self.memory) if f.endswith(".md")))
+        self.assertEqual(self.cli("doctor").stdout, "clean\n")
 
 class NightlyJob(Sandbox):
     """The launchd step, tested as the shape of a job that runs with nobody watching.

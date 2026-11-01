@@ -337,9 +337,11 @@ def promote(cid: str, memory_dir: str | None = None, dry_run: bool = False) -> t
     # Expansion-only: if the name is taken, open a new file rather than merging.
     if os.path.exists(dest):
         dest = os.path.join(mdir, "%s-%s.md" % (slugify(body.split(".")[0][:60]), cid[-4:]))
-    line = "- **%s**: [detail](%s). %s" % (
+    when = paths.now()
+    src = meta.get("source", "?")
+    line = "- **%s**: [detail](%s). %s _(promoted %s, source=%s)_" % (
         os.path.basename(dest)[:-3], os.path.basename(dest),
-        body.replace("\n", " ")[:220])
+        body.replace("\n", " ")[:160], when[:10], src)
     if dry_run:
         return True, "would write %s (+ index line)" % dest
     os.makedirs(mdir, exist_ok=True)
@@ -350,7 +352,7 @@ def promote(cid: str, memory_dir: str | None = None, dry_run: bool = False) -> t
     # reader inside the memory store never sees a record claiming to be provisional.
     out_meta = {k: v for k, v in meta.items() if not k.startswith("_")}
     out_meta["status"] = "promoted"
-    out_meta["promoted_at"] = paths.now()
+    out_meta["promoted_at"] = when
     with open(dest, "w", encoding="utf-8") as fh:
         fh.write(emit(out_meta, body))
     ok, why = append_index_line(mdir, line)
@@ -425,7 +427,8 @@ def prune_buffer(older_than_hours: float = 0.0, session: str | None = None) -> d
     return {"moved": moved, "remaining": buffer_counts()}
 
 
-def doctor(memory_dir: str | None = None, targets: list[str] | None = None) -> list[dict]:
+def doctor(memory_dir: str | None = None, targets: list[str] | None = None,
+          needle: str | None = None) -> list[dict]:
     """Read-only hygiene report.
 
     Two checks, both about content rather than formatting:
@@ -455,6 +458,17 @@ def doctor(memory_dir: str | None = None, targets: list[str] | None = None) -> l
             if n > 1:
                 out.append({"issue": "duplicate-heading-in-file", "heading": h,
                             "count": n, "file": p})
+    if needle:
+        nlow = needle.strip().lower()
+        if nlow:
+            for p, text in bodies.items():
+                if os.path.basename(p) == "MEMORY.md":
+                    # The index only points at detail files; flagging it re-reports
+                    # every hit once for the detail file it names, so skip it.
+                    continue
+                if nlow in text.lower():
+                    out.append({"issue": "stale-value-in-memory", "file": p,
+                                "value": needle})
     pool = [(c["id"], c.get("_body", "")) for c in list_candidates(with_body=True)]
     for i in range(len(pool)):
         for j in range(i + 1, len(pool)):

@@ -32,6 +32,8 @@ Sleep adds a reviewable memory cycle to Pi, OmO, and Claude Code. It records use
 - **Measured replay.** Run the same task with memory off and on before deciding whether a memory helps.
 - **Repeated preference detection.** `mine` finds instructions you gave in multiple sessions without a model call.
 - **Project isolation.** A project's provisional memory is injected only into that project.
+- **Reviewable permanence.** Each approved memory in your index carries its review date and source, so you can tell when a saved instruction was pinned.
+- **Stale-value scan.** `doctor --stale <value>` finds which approved records still hold a value you know has changed (for example a deployment URL).
 - **Safety gates.** Secrets are redacted, hostile text is quarantined, and machine-generated prompts cannot claim user provenance.
 
 ## Install
@@ -196,11 +198,12 @@ session activity -> T0 buffer -> gated sleep -> T1 provisional memory
 
 Dream is Sleep's unattended reflection phase. It does not update model weights and it never writes permanent memory on its own.
 
-A dream pass performs three steps:
+A dream pass performs four steps:
 
 1. **Mine.** Find instructions you repeated across separate sessions in the same project. This step is deterministic and makes no model call.
 2. **Consolidate.** When the sleep gate passes, ask the configured model to turn recent T0 observations into provisional T1 candidates.
-3. **Replay.** When replay is due, run selected tasks with provisional memory off and on, then write a comparison report.
+3. **Hygiene.** Run the read-only `doctor` scan and fold any findings (duplicate headings, near-duplicate candidates, or stale values when you pass `--stale <value>`) into the night's report.
+4. **Replay.** When replay is due, run selected tasks with provisional memory off and on, then write a comparison report.
 
 Every result stays reviewable. Candidates remain in T1 until you explicitly run `promote`.
 
@@ -208,6 +211,7 @@ Preview the complete dream pass without model calls or writes:
 
 ```bash
 ./sleep.py nightly --dry-run
+./sleep.py nightly --dry-run --stale https://old.internal/app   # also scan approved memory for a changed value
 ```
 
 Run it now:
@@ -242,6 +246,7 @@ Run the two dream components separately when you want more control:
 | `./sleep.py mine --dry-run` | Find preferences repeated across sessions |
 | `./sleep.py nightly --dry-run` | Preview the unattended nightly workflow |
 | `./sleep.py doctor` | Find duplicate or overlapping memory records |
+| `./sleep.py doctor --stale <value>` | Show which approved records still hold a stale value (e.g. a changed URL) |
 | `./sleep.py inject --project "$PWD"` | Print provisional context for the current project |
 
 Run `./sleep.py <command> --help` for command-specific options.
