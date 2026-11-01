@@ -44,7 +44,7 @@ const DISABLED = () => process.env.SLEEP_DISABLE === "1";
 function findRepo() {
   const fromPackage = (() => {
     try {
-      const manifest = createRequire(import.meta.url).resolve("@aydinnyunus/pi-sleep/package.json");
+      const manifest = createRequire(import.meta.url).resolve("pi-sleep-agent/package.json");
       return path.dirname(manifest);
     } catch {
       return "";
@@ -61,7 +61,7 @@ function findRepo() {
                  path.join(os.homedir(), "Research", "sleep")].filter(Boolean);
   const candidates = bases.flatMap((base) => [
     base,
-    path.join(base, "node_modules", "@aydinnyunus", "pi-sleep"),
+    path.join(base, "node_modules", "pi-sleep-agent"),
   ]);
   for (const c of candidates) {
     const r = path.resolve(c);

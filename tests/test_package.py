@@ -17,11 +17,10 @@ class PiPackage(unittest.TestCase):
 
     def test_manifest_declares_the_extension_and_skill(self):
         pkg = self.manifest()
-        self.assertEqual(pkg["name"], "@aydinnyunus/pi-sleep")
+        self.assertEqual(pkg["name"], "pi-sleep-agent")
         self.assertIn("pi-package", pkg["keywords"])
         self.assertEqual(pkg["pi"]["extensions"], ["./extension/index.ts"])
         self.assertEqual(pkg["pi"]["skills"], ["./skills"])
-        self.assertEqual(pkg["publishConfig"]["access"], "public")
         for relative in ("extension/index.ts", "skills/sleep/SKILL.md", "sleep.py"):
             self.assertTrue(os.path.isfile(os.path.join(ROOT, relative)), relative)
 
@@ -31,7 +30,13 @@ class PiPackage(unittest.TestCase):
             cwd=ROOT, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             timeout=60, check=False)
         self.assertEqual(got.returncode, 0, got.stdout + got.stderr)
-        report = json.loads(got.stdout)[0]
+        payload = json.loads(got.stdout)
+        # npm 11: [report]; npm 12: {name: report}
+        report = (
+            payload[0]
+            if isinstance(payload, list)
+            else next(iter(payload.values()))
+        )
         paths = {item["path"] for item in report["files"]}
         required = {"package.json", "extension/index.ts", "skills/sleep/SKILL.md",
                     "sleep.py", "sleepkit/cli.py", "prompts/consolidate.md",

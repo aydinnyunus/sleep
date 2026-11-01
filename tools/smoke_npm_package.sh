@@ -13,7 +13,7 @@ fi
 TGZ_NAME="$(cd "$REPO" && npm pack --ignore-scripts --pack-destination "$ROOT" | tail -1)"
 TGZ="$ROOT/$TGZ_NAME"
 npm install --prefix "$ROOT/stage" "$TGZ" --ignore-scripts --no-audit --no-fund >/dev/null
-PKG="$ROOT/stage/node_modules/@aydinnyunus/pi-sleep"
+PKG="$ROOT/stage/node_modules/pi-sleep-agent"
 PROJECT="$ROOT/project"
 mkdir -p "$PROJECT"
 
@@ -22,10 +22,10 @@ export SLEEP_HOME="$ROOT/sleep-home"
 
 cd "$PROJECT"
 "$HOST" install "$PKG" --approve >/dev/null
-"$HOST" list --approve | grep -F '@aydinnyunus/pi-sleep' >/dev/null
+"$HOST" list --approve | grep -F 'pi-sleep-agent' >/dev/null
 "$HOST" --print-prompt-sizes --no-context-files --no-builtin-tools --no-skills \
   >"$ROOT/startup.json"
-grep -F '@aydinnyunus/pi-sleep' "$ROOT/startup.json" >/dev/null
+grep -F 'pi-sleep-agent' "$ROOT/startup.json" >/dev/null
 python3 "$PKG/sleep.py" status -v >"$ROOT/status.txt"
 grep -F 'T0 buffer' "$ROOT/status.txt" >/dev/null
 # The extension's note() slices detail to 200 chars, so a long repo= path is truncated in the log.

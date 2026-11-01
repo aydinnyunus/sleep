@@ -11,7 +11,7 @@ The installed Sleep extension sets `SLEEPCTL` to the packaged Python entry point
 python3 "$SLEEPCTL" <command>
 ```
 
-If `SLEEPCTL` is empty, the extension did not load. Ask the user to install or reload `@aydinnyunus/pi-sleep`; never guess a checkout path.
+If `SLEEPCTL` is empty, the extension did not load. Ask the user to install or reload `pi-sleep-agent`; never guess a checkout path.
 
 ## User-facing command
 

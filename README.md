@@ -80,16 +80,16 @@ Without this extension, the Sleep CLI still works when you run commands manually
 
 ### Install from npm (Pi / OmO)
 
-Sleep also ships as the npm package `@aydinnyunus/pi-sleep`, so Pi and OmO can use
+Sleep also ships as the npm package `pi-sleep-agent`, so Pi and OmO can use
 
 the extension without cloning the repository. Install it through the `pi install`
 
 package flow:
 
 ```bash
-pi install npm:@aydinnyunus/pi-sleep
+pi install npm:pi-sleep-agent
 # or, for a specific published version
-pi install npm:@aydinnyunus/pi-sleep@0.1.0
+pi install npm:pi-sleep-agent@0.1.0
 ```
 
 The package contains the extension (`pi.extensions`), the Sleep skill

@@ -1,5 +1,5 @@
 {
-  "name": "@aydinnyunus/pi-sleep",
+  "name": "pi-sleep-agent",
   "version": "0.1.0",
   "description": "A reviewable sleep and dream cycle for Pi agent memory.",
   "type": "module",
@@ -44,8 +44,7 @@
     "smoke:package": "./tools/smoke_npm_package.sh"
   },
   "publishConfig": {
-    "access": "public",
-    "provenance": true
+    "provenance": false
   },
   "pi": {
     "extensions": [
