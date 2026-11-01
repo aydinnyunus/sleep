@@ -1,0 +1,91 @@
+name: build-and-release
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# GitHub Release + tag creation need write access to the repo. npm publish uses
+# the NPM_TOKEN secret, NOT this token.
+#
+# NPM_TOKEN secret: the npm account has 2FA set to auth-and-writes with a passkey.
+# A passkey can't drive CI, so create an automation token once and store it as the
+# repo/org secret NPM_TOKEN:
+#   npm token create --type automation
+# (automation tokens skip the two-factor prompt, so `npm publish` runs headless.)
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build, test, lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install ruff (lint dependency)
+        run: pip install ruff
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Validate (tests + lint + pack)
+        run: npm run validate
+
+  release:
+    name: Tag, release, publish
+    needs: build
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      released: ${{ steps.tag.outputs.released }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Read package version
+        id: version
+        run: |
+          VER=$(node -p "require('./package.json').version")
+          echo "version=$VER" >> "$GITHUB_OUTPUT"
+      - name: Check whether v<version> tag already exists (idempotency)
+        id: tag
+        run: |
+          TAG="v${{ steps.version.outputs.version }}"
+          if git tag -l "$TAG" | grep -q "$TAG"; then
+            echo "released=false" >> "$GITHUB_OUTPUT"
+            echo "Tag $TAG exists; nothing to release."
+          else
+            echo "released=true" >> "$GITHUB_OUTPUT"
+            echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git tag "$TAG"
+            git push origin "$TAG"
+          fi
+      - name: Create GitHub Release
+        if: steps.tag.outputs.released == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${{ steps.tag.outputs.tag }}" \
+            --repo "${{ github.repository }}" \
+            --title "pi-sleep-agent ${{ steps.version.outputs.version }}" \
+            --notes "Release ${{ steps.version.outputs.version }} of pi-sleep-agent."
+      - uses: actions/setup-node@v4
+        if: steps.tag.outputs.released == 'true'
+        with:
+          node-version: '22'
+          registry-url: 'https://registry.npmjs.org'
+      - name: Publish to npm (skip if version already live)
+        if: steps.tag.outputs.released == 'true'
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          if npm view "pi-sleep-agent@$VERSION" version >/dev/null 2>&1; then
+            echo "pi-sleep-agent@$VERSION already published; skipping."
+          else
+            npm publish --access public
+          fi
