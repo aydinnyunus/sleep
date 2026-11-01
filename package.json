@@ -1,0 +1,63 @@
+{
+  "name": "@aydinnyunus/pi-sleep",
+  "version": "0.1.0",
+  "description": "A reviewable sleep and dream cycle for Pi agent memory.",
+  "type": "module",
+  "license": "UNLICENSED",
+  "author": {
+    "name": "Yunus Aydin",
+    "url": "https://github.com/aydinnyunus"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/aydinnyunus/sleep.git"
+  },
+  "homepage": "https://github.com/aydinnyunus/sleep#readme",
+  "bugs": {
+    "url": "https://github.com/aydinnyunus/sleep/issues"
+  },
+  "keywords": [
+    "pi-package",
+    "pi",
+    "pi-extension",
+    "agent-skill",
+    "memory",
+    "sleep",
+    "replay"
+  ],
+  "files": [
+    "extension/index.ts",
+    "skills/sleep/SKILL.md",
+    "sleep.py",
+    "sleepkit/*.py",
+    "prompts/consolidate.md",
+    "replay/tasks.json",
+    "README.md",
+    "docs/EVIDENCE.md",
+    ".github/assets/sleep-replay.png"
+  ],
+  "scripts": {
+    "test": "python3 -m unittest discover -s tests",
+    "lint": "ruff check sleepkit sleep.py tests tools",
+    "pack:check": "npm pack --dry-run --json --ignore-scripts",
+    "validate": "npm run test && npm run lint && npm run pack:check",
+    "smoke:package": "./tools/smoke_npm_package.sh"
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
+  "pi": {
+    "extensions": [
+      "./extension/index.ts"
+    ],
+    "skills": [
+      "./skills"
+    ],
+    "image": "./.github/assets/sleep-replay.png",
+    "changelogPath": ""
+  },
+  "exports": {
+    "./package.json": "./package.json"
+  }
+}

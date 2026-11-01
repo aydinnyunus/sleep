@@ -29,6 +29,7 @@ import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, realpathSyn
 import os from "node:os";
 import path from "path";
 import { fileURLToPath } from "node:url";
+import { createRequire } from "node:module";
 
 const TRACE_LIMIT = 256 * 1024;
 const PROVISIONAL_TYPE = "sleep-provisional-memory";
@@ -41,6 +42,14 @@ const DISABLED = () => process.env.SLEEP_DISABLE === "1";
  * "paths[0] ... got undefined" (measured). The candidate with a real sleep.py wins; SLEEP_REPO overrides.
  */
 function findRepo() {
+  const fromPackage = (() => {
+    try {
+      const manifest = createRequire(import.meta.url).resolve("@aydinnyunus/pi-sleep/package.json");
+      return path.dirname(manifest);
+    } catch {
+      return "";
+    }
+  })();
   const fromSelf = (() => {
     try {
       return path.join(path.dirname(realpathSync(fileURLToPath(import.meta.url))), "..");
@@ -48,7 +57,12 @@ function findRepo() {
       return "";
     }
   })();
-  const candidates = [process.env.SLEEP_REPO, fromSelf, path.join(os.homedir(), "Research", "sleep")].filter(Boolean);
+  const bases = [process.env.SLEEP_REPO, fromPackage, fromSelf,
+                 path.join(os.homedir(), "Research", "sleep")].filter(Boolean);
+  const candidates = bases.flatMap((base) => [
+    base,
+    path.join(base, "node_modules", "@aydinnyunus", "pi-sleep"),
+  ]);
   for (const c of candidates) {
     const r = path.resolve(c);
     if (existsSync(path.join(r, "sleep.py"))) return r;
@@ -60,6 +74,12 @@ const REPO = findRepo();
 const SLEEPCTL = process.env.SLEEPCTL || path.join(REPO, "sleep.py");
 const SLEEP_HOME = process.env.SLEEP_HOME || path.join(os.homedir(), ".sleep");
 const LOG_DIR = path.join(SLEEP_HOME, "logs");
+
+// The npm package can live anywhere under Pi's managed package directory. Export the resolved
+// paths so the packaged skill and shell tools use the exact same runtime as the extension.
+process.env.SLEEP_REPO ||= REPO;
+process.env.SLEEPCTL ||= SLEEPCTL;
+process.env.SLEEP_HOME ||= SLEEP_HOME;
 
 /** Same shape as paths.now() in Python: local time + UTC offset (guards against timezone confusion). */
 function ts() {
@@ -246,7 +266,7 @@ export default function sleep(pi, options = {}) {
   }
 
   pi.on("session_start", async (event, ctx) => {
-    note("session_start", `reason=${event?.reason || "?"} cwd=${ctx?.cwd || "?"} repo=${REPO}`);
+    note("session_start", `reason=${event?.reason || "?"} cwd=${ctx?.cwd || "?"} repo=${REPO} sleepctl=${SLEEPCTL}`);
     await loadBlock(ctx);
   });
 
@@ -356,7 +376,7 @@ export default function sleep(pi, options = {}) {
   });
 
   pi.registerCommand("sleep", {
-    description: "Memory sleep cycle: /sleep [status|capture <text>|sleep|review|promote <id>|replay]",
+    description: "Memory cycle: /sleep [status|capture|sleep|mine|nightly|review|promote|replay]",
     handler: async (args, ctx) => {
       const parts = String(args || "").trim().split(/\s+/).filter(Boolean);
       const verb = parts[0] || "status";
@@ -368,6 +388,12 @@ export default function sleep(pi, options = {}) {
         case "status": invocation = ["status", "-v"]; break;
         case "capture": invocation = ["capture", "--text=" + rest.join(" "), "--source", "user", "--kind", "preference"]; break;
         case "sleep": detached = true; invocation = ["sleep", ...(flag("force") ? ["--force"] : [])]; break;
+        case "mine": invocation = ["mine", ...(flag("dry-run") ? ["--dry-run"] : [])]; break;
+        case "nightly":
+          detached = !flag("dry-run");
+          invocation = ["nightly", ...(flag("dry-run") ? ["--dry-run"] : []),
+                        ...(flag("force") ? ["--force"] : [])];
+          break;
         case "review": invocation = ["status", "-v"]; break;
         case "show": invocation = ["show", rest[0] || ""]; break;
         case "promote": invocation = ["promote", rest[0] || ""]; break;

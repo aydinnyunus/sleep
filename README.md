@@ -78,6 +78,52 @@ The log should contain `session_start`, `publish`, and `agent_settled` entries.
 
 Without this extension, the Sleep CLI still works when you run commands manually, and Claude Code can still use its own hooks. Pi and OmO, however, will not capture sessions, inject provisional memory, or trigger sleep automatically.
 
+### Install from npm (Pi / OmO)
+
+Sleep also ships as the npm package `@aydinnyunus/pi-sleep`, so Pi and OmO can use
+
+the extension without cloning the repository. Install it through the `pi install`
+
+package flow:
+
+```bash
+pi install npm:@aydinnyunus/pi-sleep
+# or, for a specific published version
+pi install npm:@aydinnyunus/pi-sleep@0.1.0
+```
+
+The package contains the extension (`pi.extensions`), the Sleep skill
+
+(`pi.skills`), and the Python runtime behind it, so the CLI works from the
+
+installed package too. Pi manages the package under its own directory; do not
+
+guess that path. The extension resolves its own runtime from the package and
+
+records it in the log, so the verification below proves it loaded the installed
+
+copy rather than a checkout:
+
+```bash
+omo -p 'hi' >/dev/null 2>&1
+tail -4 ~/.sleep/logs/extension.log     # session_start, publish, agent_settled
+```
+
+Those three log lines are the proof that the packaged extension loaded and its
+
+Python runtime ran. If they do not appear, reload the extension (`pi install` it
+
+again, or restart the session); do not dig under the package directory and guess
+
+a path.
+
+Verify the tarball contract locally without publishing:
+
+```bash
+npm run pack:check     # what npm pack would ship, as JSON
+npm run smoke:package  # install the tarball into an isolated Pi home and prove it loads
+```
+
 To remove Sleep and restore the backed-up configuration:
 
 ```bash
