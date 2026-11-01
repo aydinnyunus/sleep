@@ -33,10 +33,21 @@ sys.path.insert(0, os.path.join(ROOT, "tools"))
 # wire.py is a plain module: import its merge() so this driver keeps backups,
 # dry-run shaping, and the event wiring in exactly one place.
 import wire  # noqa: E402
+import agents  # noqa: E402
 
 CLAUDE_HOME = os.environ.get("CLAUDE_HOME") or os.path.expanduser("~/.claude-work")
 OMO_HOME = os.environ.get("OMO_HOME") or os.path.expanduser("~/.omo/agent")
 SLEEP_HOME = os.environ.get("SLEEP_HOME") or os.path.expanduser("~/.sleep")
+
+# Agents selected for capture wiring. Default is Claude Code only (preserves the
+# historical no-flag contract); the user can extend this via --agents or the
+# interactive prompt.
+_SELECTED = ["claude"]
+
+
+def _selected_agents():
+    return list(_SELECTED)
+
 
 PLATFORM = sys.platform  # darwin | linux | win32
 IS_WIN = sys.platform.startswith("win")
@@ -89,6 +100,65 @@ def confirm(question: str, default: bool) -> bool:
         print("  please answer y or n")
 
 
+def _ask_agents() -> list:
+    """Ask which agents to wire the capture into. Default: Claude Code only.
+
+    Returns the list of agent keys. ``--agents`` on argv already locked the choice
+    before this is called; without it, a real terminal asks, and a non-interactive
+    shell keeps the default (claude) so scripts and CI never hang.
+    """
+    if not interactive():
+        return _selected_agents()
+    labels = agents.target_labels()
+    keys = agents.known_keys()
+    print("  Which AI coding agents should capture sessions into the sleep cycle?")
+    print("  (default: %s)" % labels["claude"])
+    for i, k in enumerate(keys, 1):
+        print("    %d) %-12s %s" % (i, k, labels[k]))
+    while True:
+        ans = input("  Agents to install (e.g. 1,3, or numbers; Enter = 1): ").strip()
+        if ans == "":
+            return ["claude"]
+        sel = []
+        bad = []
+        for tok in ans.replace(";", ",").split(","):
+            tok = tok.strip().lower()
+            if not tok:
+                continue
+            if tok in keys:
+                sel.append(tok)
+                continue
+            if tok.isdigit():
+                idx = int(tok)
+                if 1 <= idx <= len(keys):
+                    sel.append(keys[idx - 1])
+                    continue
+            bad.append(tok)
+        if bad:
+            print("  unknown selection, try again: %s" % ", ".join(bad))
+            continue
+        # de-dup preserving order; claude is always meaningful on its own
+        seen, out = set(), []
+        for k in sel:
+            if k not in seen:
+                seen.add(k)
+                out.append(k)
+        return out or ["claude"]
+
+
+def _resolve_agents(explicit, interactive_prompt: bool) -> None:
+    """Set the module _SELECTED list from --agents, or the interactive prompt, or the default."""
+    global _SELECTED
+    if explicit is not None:
+        vals = [v.strip().lower() for v in explicit.split(",") if v.strip()]
+        bad = [v for v in vals if v not in agents.known_keys()]
+        if bad:
+            raise SystemExit("unknown flag value for --agents: %s (known: %s)" % (", ".join(bad), ", ".join(agents.known_keys())))
+        _SELECTED = vals or ["claude"]
+    elif interactive_prompt:
+        _SELECTED = _ask_agents()
+
+
 def preflight(skip_tests: bool) -> int:
     step("preflight")
     if sys.version_info < (3, 9):
@@ -135,21 +205,62 @@ def skill_link():
     print("  %s -> %s  (shared skill root)" % (target, os.path.join(ROOT, "shared-skill", "sleep")))
 
 
+def wire_shell_hook(target: dict):
+    """Wire a shell-hook target (Claude-format settings.json) via wire.py merge."""
+    cfg = target["config"](os.environ)
+    if not os.path.isfile(cfg):
+        print("  skip: %s does not exist" % cfg)
+        return
+    doc = json.load(open(cfg, encoding="utf-8"))
+    wiring = {ev: (script, target["key"]) for ev, script in target["wiring"].items()}
+    report = wire.merge(doc, ROOT, "all", remove=False, wiring=wiring)
+    for ln in report:
+        print("  %s: %s" % (os.path.basename(cfg), ln))
+    if any("added" in r for r in report):
+        _write_json_backed(cfg, doc)
+
+
+def wire_cursor_hook(target: dict):
+    """Wire a Cursor-native hooks.json (camelCase grammar) via wire.wire_cursor."""
+    cfg = target["config"](os.environ)
+    if not os.path.isfile(cfg):
+        print("  skip: %s does not exist" % cfg)
+        return
+    doc = json.load(open(cfg, encoding="utf-8"))
+    report = wire.wire_cursor(doc, ROOT, remove=False, events=tuple(target["wiring"].keys()))
+    for ln in report:
+        print("  %s: %s" % (os.path.basename(cfg), ln))
+    if any("added" in r for r in report):
+        _write_json_backed(cfg, doc)
+
+
 def hooks():
-    """Claude-side hooks via wire.py merge; clear dead sleep hooks from omo hooks.json."""
-    step("Layer 2 - hooks")
-    settings = os.path.join(CLAUDE_HOME, "settings.json")
-    if os.path.isfile(settings):
-        doc = json.load(open(settings, encoding="utf-8"))
-        report = wire.merge(doc, ROOT, "claude", remove=False)
-        for ln in report:
-            print("  %s: %s" % (os.path.basename(settings), ln))
-        if any("added" in r for r in report):
-            _write_json_backed(settings, doc)
-    else:
-        print("  skip: %s does not exist" % settings)
-    # Pi engine runs none of these; an entry in its hooks.json can never fire.
-    # An install from before Layer 2b left one there; clear it.
+    """Wire the requested agents' capture hooks, driven by the tools/agents registry.
+
+    The user chooses the agents at install time (tools/install.py --agents, or an
+    interactive prompt). Each target routes by kind: shell-hook (Claude-format
+    settings.json) through wire.merge, cursor-hooks (native camelCase grammar)
+    through wire.wire_cursor. Pi/OmO is an extension, not JSON-hook shaped, and is
+    linked separately by extension_link(). A Pi hooks.json entry is dead config and
+    is always cleared here.
+    """
+    step("Layer 2 - capture hooks")
+    sel = _selected_agents()
+    for key in sel:
+        target = agents.by_key(key)
+        if target is None:
+            print("  skip: unknown agent %r" % key)
+            continue
+        if target["kind"] == "shell-hook":
+            wire_shell_hook(target)
+        elif target["kind"] == "cursor-hooks":
+            wire_cursor_hook(target)
+        elif target["kind"] == "extension":
+            print("  %s: extension, handled by `extension` step" % target["label"])
+        else:
+            print("  skip: %s: unsupported kind %r" % (key, target["kind"]))
+    # Pi engine runs none of the Claude events; an entry in omo hooks.json can never
+    # fire. An install from before Layer 2b left one there; always clear it.
     omo = os.path.join(OMO_HOME, "hooks.json")
     if os.path.isfile(omo):
         doc = json.load(open(omo, encoding="utf-8"))
@@ -325,6 +436,7 @@ def main(argv=None) -> int:
     ap.add_argument("--nightly", action="store_true", help="also install the daily scheduler pass (launchd/cron/schtasks)")
     ap.add_argument("--launchd", action="store_true", help="alias for --nightly (macOS convention kept)")
     ap.add_argument("--extension", action="store_true")
+    ap.add_argument("--agents", metavar="LIST", help="comma-separated agent keys to wire (e.g. claude,pi,cursor); default claude. Prompted interactively if omitted.")
     ap.add_argument("--skip-tests", action="store_true")
     a = ap.parse_args(argv)
     RUN = not a.dry_run
@@ -335,16 +447,21 @@ def main(argv=None) -> int:
         return 1
     state_dirs()
     skill_link()
+
+    # Resolve which agents to wire BEFORE the hook step. A real terminal that left
+    # --agents off is asked (multi-select). Non-interactive shells (CI, scripts)
+    # default to claude only, preserving the historical contract.
+    _resolve_agents(a.agents, RUN and interactive())
+    if "pi" in _selected_agents():
+        ext = True
     hooks()
 
     # A user who ran plain `install.py` should not need to know the flags: ask
-    # the two opt-in choices in plain language. Flags already given are honored
-    # and no prompt is shown. Dry-run and non-interactive shells (CI) skip the
-    # prompts and default to the unused choice, so nothing hangs and nothing
+    # the remaining opt-in choices in plain language. Flags already given are
+    # honored and no prompt is shown. Dry-run and non-interactive shells (CI) skip
+    # the prompts and default to the unused choice, so nothing hangs and nothing
     # is scheduled without an explicit yes.
     if RUN and interactive():
-        # A plain `install.py` run asks for the two opt-in choices instead of
-        # demanding the flags. Non-interactive contexts (CI, scripts) skip both.
         if not nightly:
             nightly = confirm(
                 "Install a daily 03:41 scheduled pass (%s)? "

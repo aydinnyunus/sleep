@@ -61,6 +61,28 @@ py tools\install.py --dry-run
 py tools\install.py --extension --nightly
 ```
 
+**Which agents get the capture hooks is your choice.** A plain `install.py` on a
+real terminal asks which coding agents to wire (multi-select, default Claude Code).
+Scripts and CI can pick explicitly without a prompt:
+
+```bash
+python3 tools/install.py --agents claude          # Claude Code only (default)
+python3 tools/install.py --agents claude,cursor   # Claude Code + Cursor
+python3 tools/install.py --agents claude,pi,cursor
+```
+
+The currently supported agents:
+
+- **claude** - Claude Code hooks in your `settings.json` (UserPromptSubmit /
+  PostToolUse / Stop / PreCompact).
+- **cursor** - Cursor's native `~/.cursor/hooks.json` (camelCase grammar; wired on
+  `postToolUse` and `sessionEnd`).
+- **pi** - the Pi/OmO extension (linked when `pi` is selected, or via `--extension`).
+
+Agents that have no stable hook surface (Codex CLI, Gemini CLI, Aider, OpenHands,
+Amp, Antigravity, Windsurf, GitHub Copilot) are not wired automatically; see
+the integration notes in `tools/agents.py` before pursuing those.
+
 The installer runs the test suite first, creates backups before configuration
 changes, and is safe to run again. It is one Python script and works on macOS,
 Linux, and Windows; per-platform scheduling is chosen automatically:

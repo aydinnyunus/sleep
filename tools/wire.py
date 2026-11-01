@@ -38,10 +38,78 @@ def shape_ok(entries) -> bool:
     )
 
 
-def merge(doc: dict, root: str, profile: str, remove: bool):
+# ---- Cursor native hooks grammar (cursor.com/docs/hooks) ----
+# ~/.cursor/hooks.json is {"version":1,"hooks":{event:[{type,command,matcher,timeout}]}}
+# with camelCase event names. Different from the Claude settings.json shape wire.py
+# merges above (no wrapper "hooks" array per entry), so Cursor keeps its own writer
+# instead of forcing the Claude shape onto it. Cursor exposes no prompt-text event,
+# so capture is implicit: we wire postToolUse to the posttool capture script and
+# sessionEnd to consolidation. matcher defaults to * (match everything).
+CURSOR_EVENTS = ["sessionStart", "sessionEnd", "afterFileEdit", "postToolUse", "beforeShellExecution"]
+
+
+def _cursor_entry(command: str, timeout: int = 30) -> dict:
+    return {"type": "command", "command": command, "matcher": ".*", "timeout": timeout}
+
+
+def cursor_entries(events, command: str, timeout: int = 30) -> dict:
+    return {ev: [_cursor_entry(command, timeout)] for ev in events}
+
+
+def wire_cursor(doc: dict, root: str, remove: bool, events=("sessionEnd", "postToolUse"), timeout: int = 30):
+    """Add/remove the sleep scripts in a Cursor-format hooks doc (version:1 grammar).
+
+    Refuses to reshape a version it does not recognize, mirroring wire.merge()'
+    safety posture for the Claude shape. ``doc`` is mutated in place and the report
+    lines returned (backup/write is the caller's job, as for the claude merge).
+    """
+    report = []
+    ver = doc.get("version", 1)
+    if not isinstance(doc.get("hooks"), dict):
+        report.append("hooks: missing hooks object, left alone")
+        return report
+    hooks = doc["hooks"]
+    for ev in events:
+        command = os.path.join(root, "hooks", "sleep-posttool.sh" if ev == "postToolUse" else "sleep-consolidate.sh")
+        bucket = hooks.get(ev, [])
+        # Cursor entries are bare dicts without a "hooks" wrapper; refuse anything else
+        if bucket and not (isinstance(bucket, list) and all(isinstance(e, dict) and "command" in e for e in bucket)):
+            report.append("%s: unrecognized shape, left alone" % ev)
+            continue
+        mine = [e for e in bucket if isinstance(e, dict) and command in str(e.get("command", ""))]
+        if remove:
+            rest = [e for e in bucket if e not in mine]
+            if mine:
+                report.append("%s: removed %s" % (ev, os.path.basename(command)))
+            if rest:
+                hooks[ev] = rest
+            else:
+                hooks.pop(ev, None)
+            continue
+        if mine:
+            report.append("%s: already wired, unchanged" % ev)
+            continue
+        hooks.setdefault(ev, []).append(_cursor_entry(command, timeout))
+        report.append("%s: added %s" % (ev, os.path.basename(command)))
+    if ver != 1:
+        report.append("version: %s (expected 1; unchanged)" % ver)
+    return report
+
+
+def merge(doc: dict, root: str, profile: str, remove: bool, wiring: dict | None = None):
+
+    """Merge the sleep hooks into a Claude-format hooks doc.
+
+    ``wiring`` overrides the module-level ``WIRING`` when given (the registry in
+    tools/agents.py drives multi-agent installs with a per-target wiring). The
+    default keeps the single-file ``wire.py`` CLI acting on the measured Claude
+    events. Each wiring value is ``(script, profile)``; ``profile`` \"all\" skips
+    the per-entry filter so a caller can wire any event set.
+    """
     hooks = doc.setdefault("hooks", {})
     report = []
-    for event, (script, prof) in WIRING.items():
+    table = WIRING if wiring is None else wiring
+    for event, (script, prof) in table.items():
         if profile != "all" and prof != profile:
             continue
         command = os.path.join(root, "hooks", script)
@@ -98,6 +166,8 @@ def main(argv=None) -> int:
     ap.add_argument("--settings", required=True)
     ap.add_argument("--root", default=os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     ap.add_argument("--profile", choices=["claude", "pi", "all"], default="all")
+    ap.add_argument("--events", default=None, help="comma-separated event names to wire/remove (default: the profile's plus CURSOR_EVENTS)")
+    ap.add_argument("--cursor", action="store_true", help="use the Cursor native hooks.json grammar (wire_cursor)")
     ap.add_argument("--remove", action="store_true")
     ap.add_argument("--dry-run", action="store_true")
     a = ap.parse_args(argv)
@@ -107,7 +177,11 @@ def main(argv=None) -> int:
         return 0
     with open(path, encoding="utf-8") as handle:
         doc = json.load(handle)
-    report = merge(doc, os.path.abspath(a.root), a.profile, a.remove)
+    if a.cursor:
+        events = tuple(ev.strip() for ev in a.events.split(",")) if a.events else ("sessionEnd", "postToolUse")
+        report = wire_cursor(doc, os.path.abspath(a.root), a.remove, events=events)
+    else:
+        report = merge(doc, os.path.abspath(a.root), a.profile, a.remove)
     for line in report:
         print("  %s: %s" % (os.path.basename(path), line))
     if not any(("added" in r or "removed" in r) for r in report):

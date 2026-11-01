@@ -24,6 +24,7 @@ import time
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "tools"))
+import agents  # noqa: E402
 
 CLAUDE_HOME = os.environ.get("CLAUDE_HOME") or os.path.join(os.path.expanduser("~"), ".claude-work")
 OMO_HOME = os.environ.get("OMO_HOME") or os.path.join(os.path.expanduser("~"), ".omo", "agent")
@@ -68,11 +69,23 @@ def remove_symlink_or_move(path, label):
 
 
 def uninstall():
-    step("hooks")
-    settings = os.path.join(CLAUDE_HOME, "settings.json")
-    if os.path.exists(settings):
-        run([sys.executable, os.path.join(ROOT, "tools", "wire.py"), "--settings", settings,
-             "--profile", "claude", "--remove"] + (["--dry-run"] if not RUN else []))
+    step("capture hooks")
+    for target in agents.ALL_TARGETS:
+        if target["kind"] == "extension":
+            # extension links are removed by the "extension" step below
+            continue
+        cfg = target["config"](os.environ)
+        if not os.path.exists(cfg):
+            continue
+        wiring = {ev: (script, target["key"]) for ev, script in target["wiring"].items()}
+        if target["kind"] == "cursor-hooks":
+            run([sys.executable, os.path.join(ROOT, "tools", "wire.py"), "--settings", cfg,
+                 "--cursor", "--remove"] + (["--dry-run"] if not RUN else []))
+        else:
+            run([sys.executable, os.path.join(ROOT, "tools", "wire.py"), "--settings", cfg,
+                 "--profile", "all", "--remove", "--events", ",".join(wiring.keys())]
+                + (["--dry-run"] if not RUN else []))
+    # A Pi/omo hooks.json may still hold dead sleep entries from before Layer 2b.
     omo_hooks = os.path.join(OMO_HOME, "hooks.json")
     if os.path.exists(omo_hooks):
         run([sys.executable, os.path.join(ROOT, "tools", "wire.py"), "--settings", omo_hooks,

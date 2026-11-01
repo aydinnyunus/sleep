@@ -914,6 +914,70 @@ class WireProfile(Sandbox):
         self.assertEqual(self.read_json(path)["hooks"], {})
         self.assertNotIn("[]", self.read(path))
 
+    def cursor_doc(self, version=1, hooks=None, extra=None):
+        doc = {"version": version}
+        if hooks is not None:
+            doc["hooks"] = hooks
+        doc.update(extra or {})
+        path = os.path.join(self.claude_home, "cursor-hooks.json")
+        self.write_json(path, doc)
+        return path
+
+    def test_cursor_grammar_wires_posttooluse_and_sessionend(self):
+        """--cursor writes the Cursor-native camelCase grammar (no wrapper hooks
+        array, entries carry type/command/matcher/timeout). Only the two capture
+        events get wired; version is left at 1."""
+        path = self.cursor_doc(hooks={})
+        before = digest(path)
+        got = self.wire(path, "--cursor", "--dry-run")
+        self.assertEqual(got.returncode, 0, got.stderr)
+        self.assertIn("sessionEnd: added sleep-consolidate.sh", got.stdout)
+        self.assertIn("postToolUse: added sleep-posttool.sh", got.stdout)
+        self.assertIn("(dry-run) not written", got.stdout)
+        self.assertEqual(digest(path), before)
+        self.assertEqual(glob.glob(path + ".bak-*"), [])
+        # now really write
+        got = self.wire(path, "--cursor")
+        self.assertEqual(got.returncode, 0, got.stderr)
+        doc = self.read_json(path)
+        self.assertEqual(doc["version"], 1)
+        hooks = doc["hooks"]
+        self.assertEqual(sorted(hooks), ["postToolUse", "sessionEnd"])
+        sess = hooks["sessionEnd"][0]
+        self.assertEqual(sess["type"], "command")
+        self.assertIn("sleep-consolidate.sh", sess["command"])
+        self.assertEqual(sess["matcher"], ".*")
+        self.assertNotIn("hooks", sess, "Cursor grammar has no per-entry hooks array")
+
+    def test_cursor_removal_drops_the_sleep_entries_and_refuses_bad_shapes(self):
+        mycmd_s = os.path.join(REPO, "hooks", "sleep-consolidate.sh")
+        mycmd_p = os.path.join(REPO, "hooks", "sleep-posttool.sh")
+        foreign = [{"type": "command", "command": "/usr/bin/echo foreign", "matcher": ".*", "timeout": 5}]
+        path = self.cursor_doc(hooks={
+            "sessionEnd": [{"type": "command", "command": mycmd_s, "matcher": ".*", "timeout": 30}] + foreign,
+            "postToolUse": [{"type": "command", "command": mycmd_p, "matcher": ".*", "timeout": 30}],
+            "afterFileEdit": [{"matcher": "*", "notACommand": True}],
+        })
+        got = self.wire(path, "--cursor", "--remove")
+        self.assertEqual(got.returncode, 0, got.stderr)
+        doc = self.read_json(path)
+        self.assertEqual([e["command"] for e in doc["hooks"]["sessionEnd"]], ["/usr/bin/echo foreign"],
+                         "a co-allocated foreign cursor entry must survive removal")
+        self.assertNotIn("postToolUse", doc["hooks"])
+        self.assertEqual(doc["hooks"]["afterFileEdit"], [{"matcher": "*", "notACommand": True}],
+                         "an unrecognized cursor entry shape is left alone")
+
+    def test_cursor_ignores_a_non_version_one_hook_doc_shape(self):
+        # a doc whose hooks is not a dict should not crash and should report left alone
+        weird = os.path.join(self.claude_home, "cursor-weird.json")
+        self.write_json(weird, {"hooks": [{"type": "command", "command": "/bin/true"}]})
+        got = self.wire(weird, "--cursor")
+        self.assertEqual(got.returncode, 0, got.stderr)
+        self.assertIn("hooks: missing hooks object, left alone", got.stdout)
+        got = self.wire(weird, "--cursor", "--remove")
+        self.assertEqual(got.returncode, 0, got.stderr)
+        self.assertIn("hooks: missing hooks object, left alone", got.stdout)
+
 
 class InstallUninstall(Sandbox):
     """install.sh / uninstall.sh in a sandbox HOME that already holds foreign config."""
@@ -1016,6 +1080,55 @@ class InstallUninstall(Sandbox):
         self.assertEqual(digest(self.omo_hooks), omo)
         self.assertEqual(len(glob.glob(self.settings_path + ".bak-*")), backups,
                          "an idempotent install must not rewrite or re-back-up")
+
+    def test_install_wires_cursor_when_selected_with_dash_dash_agents(self):
+        """--agents claude,cursor wires the claude settings.json and the cursor
+        native hooks.json, while the omo engine cleanup still clears dead entries."""
+        cursor_path = os.path.join(self.home, ".cursor", "hooks.json")
+        self.write_json(cursor_path, {"version": 1, "hooks": {"afterFileEdit": [
+            {"type": "command", "command": "/usr/bin/echo foreign", "matcher": ".*"}]}})
+        got = self.install("--agents", "claude,cursor")
+        self.assertEqual(got.returncode, 0, (got.stdout + got.stderr)[-1800:])
+        # claude settings.json wired as before
+        for event in EVENTS:
+            self.assertIn(sleep_command(event), self.sleep_commands_in(self.settings_path))
+        # cursor grammar wired into its own hooks.json
+        cursor = self.read_json(cursor_path)
+        self.assertEqual(cursor["version"], 1)
+        self.assertIn("sessionEnd", cursor["hooks"])
+        self.assertIn("postToolUse", cursor["hooks"])
+        cursor_cmds = [e["command"] for ev in ("sessionEnd", "postToolUse")
+                       for e in cursor["hooks"].get(ev, [])]
+        self.assertIn(os.path.join(REPO, "hooks", "sleep-consolidate.sh"), cursor_cmds)
+        self.assertIn(os.path.join(REPO, "hooks", "sleep-posttool.sh"), cursor_cmds)
+        # the foreign afterFileEdit entry survives
+        self.assertEqual(cursor["hooks"]["afterFileEdit"][0]["command"], "/usr/bin/echo foreign")
+        self.assertEqual(self.sleep_commands_in(self.omo_hooks), [])
+
+    def test_install_without_dash_dash_agents_stays_claude_only(self):
+        """No --agents and a non-interactive shell keep the historical contract:
+        claude is wired, cursor is not."""
+        cursor_path = os.path.join(self.home, ".cursor", "hooks.json")
+        self.write_json(cursor_path, {"version": 1, "hooks": {}})
+        got = self.install()  # non-interactive: stdin is not a tty
+        self.assertEqual(got.returncode, 0, (got.stdout + got.stderr)[-1800:])
+        for event in EVENTS:
+            self.assertIn(sleep_command(event), self.sleep_commands_in(self.settings_path))
+        self.assertEqual(self.read_json(cursor_path)["hooks"], {},
+                         "cursor must not be wired unless selected")
+
+    def test_uninstall_removes_cursor_entries_too(self):
+        cursor_path = os.path.join(self.home, ".cursor", "hooks.json")
+        self.write_json(cursor_path, {"version": 1, "hooks": {
+            "sessionEnd": [{"type": "command", "command": os.path.join(REPO, "hooks", "sleep-consolidate.sh"), "matcher": ".*"}],
+            "postToolUse": [{"type": "command", "command": os.path.join(REPO, "hooks", "sleep-posttool.sh"), "matcher": ".*"}],
+        }})
+        self.install("--agents", "claude,cursor")
+        self.assertIn("sessionEnd", self.read_json(cursor_path)["hooks"])
+        got = self.uninstall()
+        self.assertEqual(got.returncode, 0, (got.stdout + got.stderr)[-1800:])
+        self.assertEqual(self.read_json(cursor_path)["hooks"], {},
+                         "uninstall must clear the cursor entries")
 
     def test_install_dry_run_and_an_unknown_flag_change_nothing(self):
         before_settings, before_omo = digest(self.settings_path), digest(self.omo_hooks)
