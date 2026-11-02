@@ -128,7 +128,17 @@ def remove_scheduler_linux():
         return 0
     body = "\n".join(kept).strip() + "\n" if kept else ""
     if RUN:
-        written = subprocess.run(["crontab", "-"], input=body, capture_output=True, text=True)
+        import tempfile as _tempfile
+        fd, tmp_cron = _tempfile.mkstemp(prefix="sleep-cron-", suffix=".txt")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                fh.write(body)
+            written = subprocess.run(["crontab", tmp_cron], capture_output=True, text=True)
+        finally:
+            try:
+                os.remove(tmp_cron)
+            except OSError:
+                pass
         if written.returncode != 0:
             print("  !! crontab write failed: " + written.stderr.strip())
             return 1

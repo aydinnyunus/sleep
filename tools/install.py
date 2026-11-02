@@ -501,7 +501,19 @@ def scheduler_linux(_nightly: bool):
         return 0
     lines.extend((CRON_BEGIN, cmd, CRON_END))
     new_cron = "\n".join(lines) + "\n"
-    in_run = subprocess.run(["crontab", "-"], input=new_cron, text=True, capture_output=True)
+    # Write to a temp file and hand crontab the path: `crontab -` (stdin) is rejected on
+    # some runners, where the argument is read as a filename and the parse fails on line 1.
+    import tempfile as _tempfile
+    fd, tmp_cron = _tempfile.mkstemp(prefix="sleep-cron-", suffix=".txt")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(new_cron)
+        in_run = subprocess.run(["crontab", tmp_cron], text=True, capture_output=True)
+    finally:
+        try:
+            os.remove(tmp_cron)
+        except OSError:
+            pass
     if in_run.returncode != 0:
         detail = (in_run.stderr or "").strip() or (r.stderr or "").strip()
         print("  crontab write failed: %s" % detail)

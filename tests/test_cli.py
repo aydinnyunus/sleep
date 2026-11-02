@@ -1474,7 +1474,7 @@ class InstallUninstall(Sandbox):
                            "17 2 * * * /usr/bin/echo foreign\n"
                            "# aydinnyunus-sleep-nightly\n"
                            "3 41 * * * /old/sleep.py nightly\n")
-        self._make_script("crontab", '#!/bin/sh\nif [ "$1" = "-l" ]; then cat "$CRON_STATE"; exit 0; fi\nif [ "$1" = "-" ]; then cat > "$CRON_STATE"; exit 0; fi\nexit 2\n')
+        self._make_script("crontab", '#!/bin/sh\ncase "$1" in\n -l) cat "$CRON_STATE"; exit 0;;\n -) cat > "$CRON_STATE"; exit 0;;\n *) cat "$1" > "$CRON_STATE"; exit 0;;\nesac\nexit 2\n')
         code = (
             "import pathlib,sys; sys.path.insert(0,sys.argv[1]); import install,uninstall; "
             "install.RUN=True; install.SLEEP_HOME=sys.argv[2]; install.scheduler_linux(True); "
@@ -1493,7 +1493,7 @@ class InstallUninstall(Sandbox):
                     "3 41 * * * /old/sleep.py nightly\n"
                     "17 2 * * * /usr/bin/foreign-job\n")
         state = self.write(self.at("crontab-malformed.txt"), original)
-        self._make_script("crontab", '#!/bin/sh\nif [ "$1" = "-l" ]; then cat "$CRON_STATE"; exit 0; fi\nif [ "$1" = "-" ]; then cat > "$CRON_STATE"; exit 0; fi\nexit 2\n')
+        self._make_script("crontab", '#!/bin/sh\ncase "$1" in\n -l) cat "$CRON_STATE"; exit 0;;\n -) cat > "$CRON_STATE"; exit 0;;\n *) cat "$1" > "$CRON_STATE"; exit 0;;\nesac\nexit 2\n')
         code = (
             "import sys; sys.path.insert(0,sys.argv[1]); import install,uninstall; "
             "install.RUN=True; install.SLEEP_HOME=sys.argv[2]; "
