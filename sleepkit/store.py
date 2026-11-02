@@ -47,7 +47,8 @@ IDX_END = "<!-- sleep:end -->"
 # ------------------------------------------------------------- frontmatter --
 def emit(record: dict, body: str = "") -> str:
     order = ["id", "ts", "source", "trust", "kind", "status", "session", "cwd",
-             "tags", "evidence", "supersedes", "superseded_by", "redacted", "notes"]
+             "tags", "evidence", "supersedes", "superseded_by",
+             "valid_from", "valid_until", "redacted", "notes"]
     # Known fields first in a stable order, then anything else the record carries.
     # Dropping the remainder silently used to eat the review audit trail: `reviewed`
     # and `promoted_to`/`promoted_at` are written by set_status and are not in `order`,
@@ -173,6 +174,16 @@ def buffer_counts() -> dict:
 # tolerate synonym swaps and reordering, and block on a lower bar. The idea was
 # already judged and rejected, so colliding with it should refuse the write.
 REFUSED_DUP_THRESHOLD = 0.42
+
+# A contradiction is not a synonym for "similar": near-duplicates restate the same
+# fact, contradicting records assert opposite things about the same subject. Only
+# pairs that share most of their wording AND carry an explicit correction marker on
+# one side are reported, so the doctor stays a signal rather than a guess.
+CONTRADICTION_OVERLAP = 0.5
+_CORRECTION = re.compile(
+    r"\b(?:no longer|not any ?more|instead of|rather than|replaced|deprecated|"
+    r"obsolete|stopped? (?:using|working)|used to|previously|but now|do(?:es)? not|"
+    r"don't|doesn't|isn't|aren't|wasn't|weren't)\b", re.I)
 
 _WORD = re.compile(r"[a-z0-9_]+")
 
@@ -426,6 +437,9 @@ def promote(cid: str, memory_dir: str | None = None, dry_run: bool = False) -> t
     out_meta = {k: v for k, v in meta.items() if not k.startswith("_")}
     out_meta["status"] = "promoted"
     out_meta["promoted_at"] = when
+    # The permanent copy's validity starts when the human approved it: a memory that
+    # outlives the record it came from needs its own start date, not the capture ts.
+    out_meta.setdefault("valid_from", when)
     with open(dest, "w", encoding="utf-8") as fh:
         fh.write(emit(out_meta, body))
     ok, why = append_index_line(mdir, line)
@@ -552,8 +566,17 @@ def demote(cid: str, memory_dir: str | None = None, dry_run: bool = False,
                   + (" (T2 default not found)" if not t2_ok else ""))
 
 def supersede(old_id: str, new_id: str) -> bool:
-    return (set_status(old_id, "superseded", {"superseded_by": new_id})
-            and set_status(new_id, "provisional", {"supersedes": old_id}))
+    """Mark old_id invalid as of now and new_id valid as of now.
+
+    A bare superseded_by pointer says *which* record replaced this one; it does not
+    say *when* the old value stopped being true. That window is what a temporal
+    question actually asks ("what did we believe before the change?"), so both ends
+    are written here. The stamp is the review clock set_status already writes, so a
+    supersede and a refusal carry the same time vocabulary.
+    """
+    now = paths.now()
+    return (set_status(old_id, "superseded", {"superseded_by": new_id, "valid_until": now})
+            and set_status(new_id, "provisional", {"supersedes": old_id, "valid_from": now}))
 
 
 # ------------------------------------------------------------ pruning -------
@@ -626,6 +649,15 @@ def doctor(memory_dir: str | None = None, targets: list[str] | None = None,
             if sim >= 0.75:
                 out.append({"issue": "near-duplicate-candidates",
                             "pair": [pool[i][0], pool[j][0]], "similarity": round(sim, 2)})
+            # Overlapping wording with a correction marker on exactly one side: the two
+            # records are about the same thing but disagree, which is the state a person
+            # has to resolve (refuse one, or supersede). Report-only; nothing is merged,
+            # reordered or dropped, and a marker on BOTH sides is only a shared theme.
+            elif sim >= CONTRADICTION_OVERLAP:
+                mi, mj = bool(_CORRECTION.search(pool[i][1])), bool(_CORRECTION.search(pool[j][1]))
+                if mi != mj:
+                    out.append({"issue": "contradicting-candidates",
+                                "pair": [pool[i][0], pool[j][0]], "similarity": round(sim, 2)})
     cutoff_hours = STALE_CANDIDATE_WEEKS * 7 * 24
     for c in list_candidates():
         if c.get("status") != "provisional":

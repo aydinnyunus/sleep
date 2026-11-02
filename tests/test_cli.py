@@ -660,6 +660,35 @@ class Gates(Sandbox):
         self.assertEqual(len(backups), 1, backups)
         self.assertIn("# Index", self.read(os.path.join(bdir, backups[0])))
 
+    def test_supersede_stamps_the_validity_window_on_both_records(self):
+        """A supersede pointer says which record replaced this one, not when the old
+        value stopped being true. Both ends are stamped so a temporal question can be
+        answered from the files alone."""
+        self.seed_candidate("c_old", "The staging URL is staging.example.io/v1.", cwd=self.proj_a)
+        self.seed_candidate("c_new", "The staging URL is staging.example.io/v2.", cwd=self.proj_a)
+        got = self.cli("supersede", "c_old", "c_new")
+        self.assertEqual(got.returncode, 0, got.stdout + got.stderr)
+        old = self.read(os.path.join(self.sleep_home, "candidates", "c_old.md"))
+        new = self.read(os.path.join(self.sleep_home, "candidates", "c_new.md"))
+        self.assertIn("valid_until:", old, "the replaced record must record when it stopped being true")
+        self.assertIn("superseded_by: c_new", old)
+        self.assertIn("valid_from:", new, "the replacing record must record when it became true")
+        self.assertIn("supersedes: c_old", new)
+        # the window is a real stamp, not an empty key
+        self.assertRegex(old, r"valid_until: \d{4}-\d{2}-\d{2}T")
+        self.assertRegex(new, r"valid_from: \d{4}-\d{2}-\d{2}T")
+
+    def test_promote_stamps_valid_from_on_the_permanent_copy(self):
+        """A memory that outlives the capture it came from needs its own start date,
+        which is the moment the human approved it."""
+        self.write(os.path.join(self.memory, "MEMORY.md"), "# Index\n")
+        self.seed_candidate("cvf", "Rtk needs `which rtk` first.", cwd=self.proj_a)
+        got = self.cli("promote", "cvf", "--memory-dir", self.memory)
+        self.assertEqual(got.returncode, 0, got.stdout + got.stderr)
+        written = [f for f in os.listdir(self.memory) if f.endswith(".md") and f != "MEMORY.md"]
+        body = self.read(os.path.join(self.memory, written[0]))
+        self.assertRegex(body, r"valid_from: \d{4}-\d{2}-\d{2}T")
+
     def test_promote_an_unknown_id_fails_and_leaves_state_intact(self):
         self.cli("status")
         self.seed_candidate("ckeep", "Any provisional record at all.", cwd=self.proj_a)
@@ -849,6 +878,34 @@ class Doctor(Sandbox):
         self.assertEqual(parked[0]["count"], 1)
         self.assertTrue(os.path.isfile(qfile), "reporting must not un-park or move the record")
         self.assertEqual(digest(qfile), before, "reporting must not rewrite the parked record")
+
+    def test_doctor_flags_a_corrected_pair_but_not_two_plain_restatements(self):
+        """Two records about the same subject that disagree are a decision a person has
+        to make (refuse one or supersede it). Two plain restatements of the same fact
+        are the existing near-duplicate signal, not a contradiction, so the correction
+        marker must gate the new issue."""
+        self.seed_candidate("cplainA", "The deploy host is mars.internal and we push from prod.",
+                            cwd=self.proj_a)
+        self.seed_candidate("cplainB", "The deploy host is venus.internal and we push from prod.",
+                            cwd=self.proj_a)
+        issues = json.loads(self.cli("doctor", "--json").stdout)
+        kinds = {i["issue"] for i in issues}
+        self.assertIn("near-duplicate-candidates", kinds)
+        self.assertNotIn("contradicting-candidates", kinds,
+                         "same shape, different value is a duplicate signal, not a contradiction")
+
+    def test_doctor_flags_the_corrected_pair_as_contradicting(self):
+        self.seed_candidate("cold", "The deploy host is mars.internal and we push from prod.",
+                            cwd=self.proj_a)
+        self.seed_candidate("cnew", "The deploy host is no longer mars.internal; we push from staging now.",
+                            cwd=self.proj_a)
+        got = self.cli("doctor")
+        self.assertEqual(got.returncode, 0, got.stderr)
+        self.assertIn("contradicting-candidates (1)", got.stdout)
+        issues = json.loads(self.cli("doctor", "--json").stdout)
+        hit = [i for i in issues if i["issue"] == "contradicting-candidates"]
+        self.assertEqual(len(hit), 1, issues)
+        self.assertEqual(sorted(hit[0]["pair"]), ["cnew", "cold"])
 
     def test_doctor_does_not_flag_a_malformed_buffer_line(self):
         """The report is about memory hygiene, not buffer parsing: pinned so nobody
