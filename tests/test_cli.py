@@ -27,6 +27,7 @@ import glob
 import hashlib
 import json
 import os
+import re
 import plistlib
 import shutil
 import subprocess
@@ -1279,8 +1280,14 @@ class InstallUninstall(Sandbox):
         self.assertTrue(os.path.isfile(plugin), "opencode plugin must be written")
         plugin_text = self.read(plugin)
         self.assertIn("export default", plugin_text)
-        self.assertIn(json.dumps(sys.executable), plugin_text)
+        # The installer bakes in whatever interpreter runs it, which in a sandbox is the
+        # shimmed python3, not this test process's sys.executable. Assert the contract the
+        # plugin actually depends on: an absolute, existing interpreter and no placeholder.
         self.assertNotIn("__SLEEP_PYTHON__", plugin_text)
+        m = re.search(r'INSTALLED_PYTHON = "(.*?)"', plugin_text)
+        self.assertIsNotNone(m, "the plugin must embed an interpreter path at install time")
+        self.assertTrue(os.path.isabs(m.group(1)), "embedded interpreter must be an absolute path")
+        self.assertTrue(os.path.exists(m.group(1)), "embedded interpreter must exist: %s" % m.group(1))
         # Oh My Pi extension link (OMP_HOME)
         omphome = os.path.join(self.home, ".omp", "agent")
         link = os.path.join(omphome, "extensions", "sleep")
