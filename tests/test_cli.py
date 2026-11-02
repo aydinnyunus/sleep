@@ -1946,6 +1946,8 @@ class ProjectAttribution(Sandbox):
         self.assertEqual(stale[0]["id"], "cold")
         self.assertEqual(stale[0]["rediscovered"], 0)
 
+@unittest.skipUnless(sys.platform == "darwin",
+                     "launchd/plist rendering is macOS-only; elsewhere --launchd installs cron")
 class NightlyJob(Sandbox):
     """The launchd step, tested as the shape of a job that runs with nobody watching.
 
