@@ -275,7 +275,7 @@ A dream pass performs four steps:
 
 1. **Mine.** Find instructions you repeated across separate sessions in the same project. This step is deterministic and makes no model call.
 2. **Consolidate.** When the sleep gate passes, ask the configured model to turn recent T0 observations into provisional T1 candidates.
-3. **Hygiene.** Run the read-only `doctor` scan and fold any findings (duplicate headings, near-duplicate candidates, records parked in quarantine awaiting review, or stale values when you pass `--stale <value>`) into the night's report.
+3. **Hygiene.** Run the read-only `doctor` scan and fold any findings (duplicate headings, near-duplicate or contradicting candidates, records parked in quarantine awaiting review, or stale values when you pass `--stale <value>`) into the night's report.
 4. **Replay.** When replay is due, run selected tasks with provisional memory off and on, then write a comparison report.
 
 Every result stays reviewable. Candidates remain in T1 until you explicitly run `promote`.
@@ -319,8 +319,9 @@ Run the two dream components separately when you want more control:
 | `./sleep.py replay --run --limit 3` | Compare selected tasks with memory off and on |
 | `./sleep.py mine --dry-run` | Find preferences repeated across sessions |
 | `./sleep.py nightly --dry-run` | Preview the unattended nightly workflow |
-| `./sleep.py doctor` | Find duplicate or overlapping memory records, flag provisional candidates not rediscovered for 4+ weeks, and report records parked in quarantine awaiting a human (report only, never dropped or un-parked) |
+| `./sleep.py doctor` | Find duplicate or overlapping memory records, flag contradicting candidates (same subject, one side carries a correction marker), flag provisional candidates not rediscovered for 4+ weeks, and report records parked in quarantine awaiting a human (report only, never dropped, merged or un-parked) |
 | `./sleep.py doctor --stale <value>` | Show which approved records still hold a stale value (e.g. a changed URL) |
+| `./sleep.py supersede <old> <new>` | Mark `<old>` invalid as of now and `<new>` valid as of now (`valid_until` / `valid_from`), so the window a memory was true is readable from the files |
 | `./sleep.py inject --project "$PWD"` | Print provisional context for the current project, newest first, each line dated |
 | `./sleep.py inject --project "$PWD" --query "..."` | Same, but rank records by overlap with the live request so the most relevant survive `--max` |
 
