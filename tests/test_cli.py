@@ -798,6 +798,28 @@ class Doctor(Sandbox):
         self.assertTrue(all("issue" in i for i in issues))
         self.assertEqual(self.tree_state(self.memory), before, "doctor is read-only")
 
+    def test_doctor_surfaces_quarantine_entries_awaiting_a_human(self):
+        """A parked record is held out of every future consolidation until a person reads
+        it, so `doctor` answering "clean" while the queue holds records answers the
+        question dishonestly. Report the count, change nothing, exit 0."""
+        qdir = os.path.join(self.sleep_home, ".quarantine")
+        os.makedirs(qdir, exist_ok=True)
+        self.write_json(os.path.join(qdir, "b-quarantined1.json"),
+                        {"id": "b-quarantined1", "reason": "system-prompt reference",
+                         "text": "some parked text", "source": "user"})
+        qfile = os.path.join(qdir, "b-quarantined1.json")
+        before = digest(qfile)
+        got = self.cli("doctor")
+        self.assertEqual(got.returncode, 0, got.stderr)
+        self.assertIn("quarantine-awaiting-review (1)", got.stdout)
+        self.assertIn("b-quarantined1", got.stdout)
+        issues = json.loads(self.cli("doctor", "--json").stdout)
+        parked = [i for i in issues if i["issue"] == "quarantine-awaiting-review"]
+        self.assertEqual(len(parked), 1, issues)
+        self.assertEqual(parked[0]["count"], 1)
+        self.assertTrue(os.path.isfile(qfile), "reporting must not un-park or move the record")
+        self.assertEqual(digest(qfile), before, "reporting must not rewrite the parked record")
+
     def test_doctor_does_not_flag_a_malformed_buffer_line(self):
         """The report is about memory hygiene, not buffer parsing: pinned so nobody
         assumes a corrupted buffer will surface here. `status` is what tolerates it."""
@@ -2061,6 +2083,31 @@ class Mined(Sandbox):
         self.assertNotIn("criteria_keywords", tasks[0],
                          "a proposed task must not grade itself; keywords are a human add")
         self.assertIn(self.PREF, tasks[0]["prompt"])
+
+    def test_a_skill_payload_repeated_as_a_prompt_is_not_a_mined_preference(self):
+        """Measured 2026-11-01: the body of ai-evaluator-pass/SKILL.md arrived as the user
+        turn twice and was mined into a "preference". A verdict token alone is something a
+        person types too, so the rule is compound: a verdict token AND a body constraint."""
+        payload = ("Open .github/assets/sleep-replay.png as an image and visually inspect "
+                   "its pixels. Return PASS or FAIL for GitHub README use. Be concise. "
+                   "Do not edit files.")
+        self.say(payload, "s-skill-a")
+        self.say(payload, "s-skill-b")
+        rec = self.buffer_records()[0]
+        self.assertEqual(rec["source"], "inferred",
+                         "a skill payload must not keep user provenance")
+        self.assertIn("skill payload", rec["relayed"])
+        rep = json.loads(self.cli("mine", "--dry-run").stdout)
+        self.assertEqual(rep["instructions"], 0, json.dumps(rep, indent=2))
+
+    def test_a_person_asking_for_a_verdict_is_still_the_persons_words(self):
+        # The compound rule must not swallow a real review request: a verdict token
+        # without a skill-body constraint stays the user's own instruction.
+        self.say("Review this MR and return PASS or FAIL for me.", "s-verdict-a")
+        self.say("Review this MR and return PASS or FAIL for me.", "s-verdict-b")
+        rec = self.buffer_records()[0]
+        self.assertEqual(rec["source"], "user")
+        self.assertNotIn("relayed", rec)
 
     def test_same_words_once_in_two_projects_are_not_a_pattern(self):
         self.say(self.PREF, "s-a", cwd=self.proj_a)

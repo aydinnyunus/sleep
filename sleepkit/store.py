@@ -651,4 +651,17 @@ def doctor(memory_dir: str | None = None, targets: list[str] | None = None,
             if sim >= 0.7:
                 out.append({"issue": "candidate-duplicates-memory", "id": cid, "file": path,
                             "similarity": round(sim, 2)})
+    # Quarantine is a wait-for-a-human state, not a resting state: entries parked there
+    # are held out of every future consolidation until someone reads them. `doctor`
+    # reporting "clean" while the queue holds parked records is the failure a user hits
+    # by asking exactly the question doctor answers ("is anything waiting on me?").
+    # Report the count and the newest ids; nothing is dropped or changed here.
+    # Path assembled without paths.home(): home() creates the whole tier skeleton as a
+    # side effect, and a read-only report that lays down directories is not read-only.
+    qdir = os.path.join(paths.SLEEP_HOME, ".quarantine")
+    if os.path.isdir(qdir):
+        parked = sorted(f for f in os.listdir(qdir) if f.endswith(".json"))
+        if parked:
+            out.append({"issue": "quarantine-awaiting-review", "count": len(parked),
+                        "newest": [f[:-5] for f in parked[-3:]]})
     return out

@@ -141,6 +141,24 @@ _RELAY_WEAK = [
                 r"read-only code review\.|work in the git repo\b)"), "addressed to a role"),
 ]
 
+# A skill's body reaches the hook as a typed prompt: the person invokes a slash command
+# and the harness sends the skill text as the user turn, so it looks like authored speech
+# while it is a program's instructions to a model. Measured 2026-11-01: the payload of
+# ~/.claude-work/skills/ai-evaluator-pass/SKILL.md was captured twice as source=user and
+# mined into a "preference" candidate; the shape gives it away. It is COMPOUND on purpose:
+# a verdict token alone ("return PASS or FAIL") is something a person also types when they
+# want a review, so it only counts together with a body-level constraint ("be concise",
+# "do not edit files") that a slash-command payload carries and a person rarely does.
+_RELAY_VERDICT = re.compile(
+    r"(?i)\b(?:return|respond with|answer|reply)\s+(?:pass|fail|ok|done)\b"
+    r"(?:\s*(?:or|/)\s*(?:pass|fail|ok|done)\b)?")
+_RELAY_BODY_CONSTRAINT = re.compile(
+    r"(?i)\b(?:do not (?:edit|modify|write|create|touch)\s+(?:any\s+)?files?|be concise)\b")
+_RELAY_COMPOUND = [
+    (lambda t: bool(_RELAY_VERDICT.search(t)) and bool(_RELAY_BODY_CONSTRAINT.search(t)),
+     "skill payload (verdict token + body constraint)"),
+]
+
 
 def machine_driven(environ: dict | None = None) -> str:
     """Name of an env marker proving this session was spawned by a host, else "".
@@ -162,6 +180,9 @@ def relay_reason(text: str, environ: dict | None = None) -> str | None:
     t = text or ""
     for pat, why in _RELAY_STRONG:
         if pat.search(t):
+            return why
+    for pred, why in _RELAY_COMPOUND:
+        if pred(t):
             return why
     if machine_driven(environ):
         for pat, why in _RELAY_WEAK:
