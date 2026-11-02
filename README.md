@@ -6,14 +6,14 @@
 
 Capture while agents work. Consolidate when they stop. Promote only what you approve.
 
-[![Tests](https://img.shields.io/badge/tests-127%20passing-c4f042?labelColor=111827&style=flat-square)](#install)
+[![Tests](https://img.shields.io/badge/tests-177%20passing-c4f042?labelColor=111827&style=flat-square)](#install)
 [![Python](https://img.shields.io/badge/python-3.10%2B-369eff?labelColor=111827&style=flat-square)](https://www.python.org/)
 [![Runtime dependencies](https://img.shields.io/badge/runtime%20dependencies-0-ffcb47?labelColor=111827&style=flat-square)](#install)
-[![Agents](https://img.shields.io/badge/agents-Pi%20%7C%20Claude-a78bfa?labelColor=111827&style=flat-square)](#supported-agents)
+[![Agents](https://img.shields.io/badge/agent%20targets-9-a78bfa?labelColor=111827&style=flat-square)](#supported-agents)
 
 </div>
 
-Sleep adds a reviewable memory cycle to Pi, OmO, and Claude Code. It records useful observations during a session, turns them into provisional memory after the session, and keeps permanent memory behind an explicit human approval step.
+Sleep adds a reviewable memory cycle to nine selectable coding-agent targets. It records useful observations during a session, turns them into provisional memory after the session, and keeps permanent memory behind an explicit human approval step.
 
 <p align="center">
   <img src=".github/assets/sleep-replay.png" alt="Terminal showing the sleep cycle: agents capture observations, sleep consolidates them into provisional memory, and only your promote makes them permanent" width="920" />
@@ -42,7 +42,7 @@ Requirements:
 
 - Python 3.10 or newer
 - Claude Code CLI for model-backed consolidation and replay
-- Pi, OmO, Claude Code, or any combination of them
+- One or more supported coding agents from the table below
 
 ```bash
 ./install.sh --dry-run     # show every change without writing
@@ -66,33 +66,59 @@ real terminal asks which coding agents to wire (multi-select, default Claude Cod
 Scripts and CI can pick explicitly without a prompt:
 
 ```bash
-python3 tools/install.py --agents claude          # Claude Code only (default)
-python3 tools/install.py --agents claude,cursor   # Claude Code + Cursor
-python3 tools/install.py --agents claude,pi,cursor
+python3 tools/install.py --agents claude                 # Claude Code only (default)
+python3 tools/install.py --agents claude,gemini,cursor # several verified hook formats
+python3 tools/install.py --agents pi,oh-my-pi          # extension targets stay independent
+SLEEP_PROJECT=/path/to/project python3 tools/install.py --agents opencode
 ```
 
-The currently supported agents:
+Accepted keys are `claude`, `gemini`, `pi`, `oh-my-pi`, `cursor`, `opencode`,
+`windsurf`, `codex`, and `cline`. The interactive prompt shows the same list.
+Selecting one key never installs another key. The older `--extension` flag selects
+`pi` only.
 
-- **claude** - Claude Code hooks in your `settings.json` (UserPromptSubmit /
-  PostToolUse / Stop / PreCompact).
-- **cursor** - Cursor's native `~/.cursor/hooks.json` (camelCase grammar; wired on
-  `postToolUse` and `sessionEnd`).
-- **pi** - the Pi/OmO extension (linked when `pi` is selected, or via `--extension`).
+| Key | Surface written | Capability | Confidence |
+|---|---|---|---|
+| `claude` | `$CLAUDE_HOME/settings.json` | Prompt capture, tool capture, stop and compact consolidation | Verified |
+| `gemini` | `~/.gemini/settings.json` | `BeforePrompt`, `AfterTool`, `SessionEnd` | Measured hook grammar |
+| `pi` | `~/.omo/agent/extensions/sleep` | Full TypeScript extension capture and context injection | Verified |
+| `oh-my-pi` | `~/.omp/agent/extensions/sleep` | Pi-lineage extension path | Best effort |
+| `cursor` | `~/.cursor/hooks.json` | Tool capture and session-end consolidation | Documented native hooks |
+| `opencode` | `<project>/.opencode/` | Tool capture and idle consolidation through a project plugin | Verified plugin grammar |
+| `windsurf` | `~/.codeium/windsurf/hooks.json` | Prompt and code-write capture | Measured hook grammar |
+| `codex` | `~/.codex/config.toml` | Completion notification only; no per-turn prompt capture | Documented, limited |
+| `cline` | VS Code user `settings.json` | `request_created` capture only | Best effort |
 
-Agents that have no stable hook surface (Codex CLI, Gemini CLI, Aider, OpenHands,
-Amp, Antigravity, Windsurf, GitHub Copilot) are not wired automatically; see
-the integration notes in `tools/agents.py` before pursuing those.
+OpenCode is project-scoped. Set `SLEEP_PROJECT` when the project is not the
+current directory. The installer renders the repository path into the copied
+plugin and registers `./.opencode/plugins` in that project's
+`.opencode/opencode.json`.
+
+Codex has no per-turn hook. Its `[notify]` integration can wake consolidation
+when a run completes, but it cannot capture the prompt stream. If `[notify]`
+already owns a different command, Sleep leaves it unchanged. Cline and Oh My Pi
+are marked best effort because their public integration contracts are less stable.
+A missing event should be reported with the affected agent, config path, and the
+last lines from `~/.sleep/logs/`.
+
+Amp, Antigravity, GitHub Copilot, Aider, and OpenHands are not installer targets.
+Their available surfaces are respectively absent/unstable lifecycle hooks or
+transcript/event-stream polling, which this installer does not impersonate as a
+working command-hook integration.
 
 The installer runs the test suite first, creates backups before configuration
-changes, and is safe to run again. It is one Python script and works on macOS,
-Linux, and Windows; per-platform scheduling is chosen automatically:
+changes, and is safe to run again. `--dry-run` does not modify existing links or
+config files. Uninstall removes only exact Sleep-owned commands, preserves foreign
+entries, and backs up JSON/TOML files before changing them. It is one Python
+script and works on macOS, Linux, and Windows; per-platform scheduling is chosen
+automatically:
 
 - **macOS** - a LaunchAgent (`~/Library/LaunchAgents/com.aydinnyunus.sleep-nightly.plist`).
-- **Linux** - a cron job (`crontab -l`, guarded by a `# aydinnyunus-sleep-nightly` marker).
+- **Linux** - a cron job (`crontab -l`, kept inside owned `# BEGIN/END aydinnyunus-sleep-nightly` markers).
 - **Windows** - a Task Scheduler task via `schtasks /create /tn aydinnyunus-sleep-nightly`.
 
 
-### Pi / OmO extension
+### Pi / OmO and Oh My Pi extensions
 
 Pi and OmO require Sleep's user-installed extension for automatic integration:
 
@@ -100,11 +126,16 @@ Pi and OmO require Sleep's user-installed extension for automatic integration:
 ./install.sh --extension
 ```
 
-The installer links this repository's `extension/` directory to:
+The installer links this repository's `extension/` directory to the selected
+extension target only:
 
 ```text
-~/.omo/agent/extensions/sleep
+pi        -> ~/.omo/agent/extensions/sleep
+oh-my-pi -> ~/.omp/agent/extensions/sleep
 ```
+
+Use `--agents oh-my-pi` for Oh My Pi. `--extension` remains an alias for selecting
+`pi`; it does not install Oh My Pi implicitly.
 
 The extension loads on the next Pi or OmO session and performs three jobs:
 
@@ -295,12 +326,12 @@ Run `./sleep.py <command> --help` for command-specific options.
 
 ## Supported agents
 
-| Agent | Integration |
-|---|---|
-| Claude Code | `UserPromptSubmit`, `PostToolUse`, `Stop`, and `PreCompact` hooks |
-| Pi / OmO | Required user-installed extension: `./install.sh --extension` |
-
-Both integrations share `$SLEEP_HOME`, so candidates reviewed from one client are visible to the other when the project scope matches.
+The installer support matrix and confidence levels live in [Install](#install).
+All selected integrations share `$SLEEP_HOME`, so candidates reviewed from one
+client are visible to another when the project scope matches. Capture depth is not
+identical: Claude, Gemini, Pi/OmO, OpenCode, Cursor, and Windsurf expose multiple
+lifecycle boundaries; Codex is completion-only; Cline is request-created-only;
+Oh My Pi is a best-effort Pi-lineage extension path.
 
 ## Configure unattended model calls
 
@@ -346,7 +377,7 @@ Additional safeguards:
 - Provisional memory is rendered as background, not as an instruction.
 - Secret-like values are replaced with redaction markers.
 - Prompt-injection and exfiltration shapes are moved to quarantine.
-- Mixed-project buffers fail closed instead of assigning facts to the wrong project.
+- Mixed-project buffers are partitioned by project and consolidated separately; unaddressed records stay in T0.
 - Replay reports results but never promotes memory automatically.
 - Every model call has an explicit budget limit.
 
@@ -405,7 +436,7 @@ Confirm that `~/.sleep/env` exists, has mode `0600`, and contains the same provi
 
 **A candidate appears in the wrong context**
 
-Run `./sleep.py show <id>` and check its `cwd`. Mixed-project batches are kept in T0 and return an error instead of producing candidates.
+Run `./sleep.py show <id>` and check its `cwd`. Mixed-project batches are partitioned by canonical `cwd`; each project is consolidated independently, while records without a project address stay in T0.
 
 ## More documentation
 
