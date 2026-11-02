@@ -252,15 +252,21 @@ export default function sleep(pi, options = {}) {
   // request makes a duplicate impossible and makes stale memory impossible the same way.
   let block = "";
 
-  async function loadBlock(ctx) {
+  // The live request text is passed as --query so the store can rank provisional records by
+  // overlap: with a capped --max, ordering decides what a model sees, and the newest line is
+  // not always the relevant one. Empty query = newest-first, the safe default.
+  async function loadBlock(ctx, query = "") {
     if (DISABLED()) return "";
     const cwd = ctx?.cwd || "";
+    const args = ["inject", "--project", cwd];
+    const q = String(query || "").trim().slice(0, 2000);
+    if (q) args.push("--query", q);
     // 5s, not the 20s default: this runs before the human's first reply is worth waiting on.
-    const res = await sleepctl(["inject", "--project", cwd], 5000);
+    const res = await sleepctl(args, 5000);
     const text = (res.stdout || "").trim();
     block = text.includes("<provisional-memory") ? text : "";
     note("publish", block
-      ? `cached ${block.length} chars for project=${cwd || "?"}`
+      ? `cached ${block.length} chars for project=${cwd || "?"} query=${q ? "yes" : "no"}`
       : `nothing to publish project=${cwd || "?"} ok=${res.ok} ${res.reason || ""}`.slice(0, 180));
     return block;
   }
@@ -288,6 +294,9 @@ export default function sleep(pi, options = {}) {
       pi_source: src, // rpc text wears the user's voice; Python decides what it is worth
     }, watchTimer);
     note("capture", `userprompt chars=${text.length} src=${src || "?"}`);
+    // Re-rank the provisional block against what this request is about, so the next
+    // request (the one that answers it) sees the most relevant memory first.
+    void loadBlock(ctx, text);
   });
 
   pi.on("tool_execution_start", async (event) => {

@@ -482,6 +482,35 @@ class StatusShowInject(Sandbox):
         self.assertEqual(got.returncode, 0, got.stdout + got.stderr)
         self.assertEqual(got.stdout, "", "no block, not an empty wrapper")
 
+    def test_inject_ranks_by_query_overlap_and_reveals_the_records_age(self):
+        """Two provisional facts, one matching the query: the matching one must survive
+        a --max 1 cut, and every line must carry how old the record is, so a model can
+        discount a three-week-old memory instead of reading it as current."""
+        self.seed_candidate("cold", "The internal GitLab needs a PAT with read_api scope.",
+                            cwd=self.proj_a)
+        self.seed_candidate("chot", "Wrote a scratch note while writing the onboarding doc.",
+                            cwd=self.proj_a)
+        got = self.cli("inject", "--project", self.proj_a, "--max", "1",
+                       "--query", "gitlab read_api token")
+        self.assertEqual(got.returncode, 0, got.stderr)
+        self.assertIn("GitLab", got.stdout, "the query-matching record must win the cut")
+        self.assertNotIn("scratch note", got.stdout)
+        self.assertIn("(recorded ", got.stdout, "the age must be shown on the line")
+
+    def test_inject_without_a_query_is_newest_first_and_keeps_the_frame(self):
+        self.seed_candidate("colder", "An older provisional fact about deployments.",
+                            cwd=self.proj_a)
+        newer = self.write(os.path.join(self.sleep_home, "candidates", "newer.md"),
+                           "---\nid: cnewer\nts: 2099-01-01T00:00:00+0300\nsource: agent\n"
+                           "trust: observed\nkind: fact\nstatus: provisional\n"
+                           "session: s\ncwd: %s\ntags: \nevidence: \nsupersedes: \n"
+                           "superseded_by: \nredacted: false\nnotes: \n---\n"
+                           "A much newer provisional fact.\n" % self.proj_a)
+        self.assertTrue(os.path.isfile(newer))
+        got = self.cli("inject", "--project", self.proj_a, "--max", "1")
+        self.assertIn("much newer provisional fact", got.stdout)
+        self.assertNotIn("older provisional fact", got.stdout)
+
     def test_inject_max_caps_the_block_but_keeps_the_frame(self):
         self.seed_candidate("cmax1", "First provisional line for the max test.",
                             cwd=self.proj_a)

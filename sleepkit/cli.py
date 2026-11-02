@@ -300,12 +300,48 @@ def _within_project(candidate_cwd: str, project: str) -> bool:
         return False
 
 
+def _age_label(ts: str):
+    """Human-scale age for one record ("just now", "3h ago", "12d ago").
+
+    A model that can see a memory is three weeks old can discount it; one that sees
+    a bare fact cannot. Unparseable or missing timestamps yield None and the age is
+    simply omitted rather than guessed.
+    """
+    hours = store._hours_since(ts)
+    if hours is None:
+        return None
+    if hours < 1:
+        return "just now"
+    if hours < 48:
+        return "%dh ago" % int(hours)
+    return "%dd ago" % int(hours // 24)
+
+
+def _inject_rank(records: list, query: str) -> list:
+    """Order records by overlap with ``query``, newest first as the tie-break.
+
+    Selection, not retrieval: there is no index and no embedding, only the same
+    token-overlap the dedupe gate already uses. With no query the order is by
+    timestamp descending, so the freshest memory is what survives a --max cut.
+    """
+    q = store._tokens(query) if query else set()
+    if q:
+        scored = []
+        for c in records:
+            body = c.get("_body", "")
+            overlap = len(q & store._tokens(body))
+            scored.append((overlap, c.get("ts", ""), c))
+        scored.sort(key=lambda t: (t[0], t[1]), reverse=True)
+        return [c for _, _, c in scored]
+    return sorted(records, key=lambda c: c.get("ts", ""), reverse=True)
+
+
 def cmd_inject(a) -> int:
     """Print the provisional-memory block for a session's context. Framed as context."""
+    pool = [c for c in store.list_candidates(status="provisional", with_body=True)
+            if _within_project(c.get("cwd", ""), a.project)]
     recs = []
-    for c in store.list_candidates(status="provisional", with_body=True):
-        if not _within_project(c.get("cwd", ""), a.project):
-            continue
+    for c in _inject_rank(pool, getattr(a, "query", "") or ""):
         body = c.get("_body", "")
         src = c.get("source")
         trust = c.get("trust")
@@ -314,7 +350,11 @@ def cmd_inject(a) -> int:
         # its concrete targets masked so a wrong guess stays unactionable.
         if not (src == "user" and trust == "verified"):
             body, _ = safety.mask_unverified_targets(body)
-        recs.append(safety.render_for_context({"text": body, "source": src, "trust": trust}))
+        line = safety.render_for_context({"text": body, "source": src, "trust": trust})
+        age = _age_label(c.get("ts", ""))
+        if age:
+            line += "  (recorded %s)" % age
+        recs.append(line)
     if not recs:
         return 0
     _p("<provisional-memory unverified=\"true\">")
@@ -454,6 +494,9 @@ def main(argv=None) -> int:
     ij = sub.add_parser("inject", help="print the provisional-memory context block")
     ij.add_argument("--project", default="")
     ij.add_argument("--max", type=int, default=12)
+    ij.add_argument("--query", default="",
+                    help="rank provisional records by overlap with this text "
+                         "(the live request); newest first when omitted")
     ij.set_defaults(fn=cmd_inject)
 
     a = ap.parse_args(argv)
