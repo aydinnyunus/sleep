@@ -503,7 +503,12 @@ def scheduler_linux(_nightly: bool):
     new_cron = "\n".join(lines) + "\n"
     in_run = subprocess.run(["crontab", "-"], input=new_cron, text=True, capture_output=True)
     if in_run.returncode != 0:
-        print("  crontab write failed: %s" % (in_run.stderr or r.stderr).strip())
+        detail = (in_run.stderr or "").strip() or (r.stderr or "").strip()
+        print("  crontab write failed: %s" % detail)
+        # Show exactly what was refused: without the body a failure here is unactionable,
+        # and the runner's own error names a line number that only makes sense with it.
+        for n, ln in enumerate(new_cron.splitlines(), 1):
+            print("  crontab[%d]: %s" % (n, ln))
     else:
         print("  installed cron line (03:41 daily)")
         return 0
