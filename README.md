@@ -33,6 +33,7 @@ Sleep adds a reviewable memory cycle to nine selectable coding-agent targets. It
 - **Repeated preference detection.** `mine` finds instructions you gave in multiple sessions without a model call.
 - **Project isolation.** A project's provisional memory is injected only into that project.
 - **Reviewable permanence.** Each approved memory in your index carries its review date and source, so you can tell when a saved instruction was pinned.
+- **Relevance-ranked injection.** With a query, provisional memory is ordered by overlap with the live request and each line carries its age, so the most relevant record survives the `--max` cut and stale facts read as stale.
 - **Stale-value scan.** `doctor --stale <value>` finds which approved records still hold a value you know has changed (for example a deployment URL). Unreviewed provisional candidates are also flagged: a fact the agent proposed once and never rediscovered for 4+ weeks keeps getting injected into every session's context, so `doctor` surfaces it as `stale-candidate-unrediscovered` (a report line it never acts on, nothing is dropped).
 - **Safety gates.** Secrets are redacted, hostile text is quarantined, and machine-generated prompts cannot claim user provenance.
 
@@ -320,7 +321,8 @@ Run the two dream components separately when you want more control:
 | `./sleep.py nightly --dry-run` | Preview the unattended nightly workflow |
 | `./sleep.py doctor` | Find duplicate or overlapping memory records, flag provisional candidates not rediscovered for 4+ weeks, and report records parked in quarantine awaiting a human (report only, never dropped or un-parked) |
 | `./sleep.py doctor --stale <value>` | Show which approved records still hold a stale value (e.g. a changed URL) |
-| `./sleep.py inject --project "$PWD"` | Print provisional context for the current project |
+| `./sleep.py inject --project "$PWD"` | Print provisional context for the current project, newest first, each line dated |
+| `./sleep.py inject --project "$PWD" --query "..."` | Same, but rank records by overlap with the live request so the most relevant survive `--max` |
 
 Run `./sleep.py <command> --help` for command-specific options.
 
