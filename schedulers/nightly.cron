@@ -1,10 +1,11 @@
-# aydinnyunus-sleep-nightly
+# BEGIN aydinnyunus-sleep-nightly
 # One unattended pass a day at 03:41. Report-only: `nightly` runs the gated
 # consolidation (T0 -> T1 candidates) and, once a week, a replay report.
 # Neither half can write T2, so nothing unattended can reach a session as a
 # directive. Promotion stays a human running `sleepctl promote`.
 # Install via: python3 tools/install.py --nightly  (appends this line to crontab -e)
-# Manual:        crontab -e  then paste the __SLEEP_CRON__ line below.
+# Manual:        crontab -e  then paste the __SLEEP_CRON__
+# END aydinnyunus-sleep-nightly line below.
 # After editing: crontab -l | grep aydinnyunus
-# Remove:        crontab -l | grep -v aydinnyunus | crontab -
+# Remove:        python3 tools/uninstall.py
 __SLEEP_CRON__

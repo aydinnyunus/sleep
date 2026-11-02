@@ -6,11 +6,9 @@ the repo\'s hook scripts), and how to (un)wire them. install.py drives this tabl
 through an interactive user choice - the person installing decides which agents
 get the sleep hooks, instead of the installer assuming "claude + pi".
 
-Two capture gradients exist today:
-  * shell-hook targets: config is a JSON "hooks" object mapping event -> [{hooks:
-    [{type:command,command:<abs script>,timeout}]}], which tools/wire.py can merge.
-  * extension targets: a TypeScript extension loaded by the harness (Pi/OmO and
-    its forks), linked into a harness extensions dir. Not JSON-hook shaped.
+Targets use the native surface each agent exposes: Claude-format hooks, dedicated
+Cursor/Windsurf/Cline JSON grammars, Codex TOML notify, OpenCode project plugins,
+or a TypeScript extension linked into Pi/OmO-family extension directories.
 
 Everything below is data; the merge/backup/remove logic stays in tools/wire.py so
 backups, dry-run shaping, and idempotence live in exactly one place.
@@ -18,6 +16,7 @@ backups, dry-run shaping, and idempotence live in exactly one place.
 from __future__ import annotations
 
 import os
+import sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -86,11 +85,150 @@ CURSOR = {
     "help": "Writes postToolUse/sessionEnd entries into ~/.cursor/hooks.json (Cursor-native camelCase grammar).",
 }
 
-SHELL_HOOK_TARGETS = [CLAUDE]
-EXTENSION_TARGETS = [PI]
-CURSOR_TARGETS = [CURSOR]
+# OpenCode (opencode.ai): TS plugin system. Verified against a real installed plugin
+# (ecc-hooks.ts): .opencode/opencode.json registers a plugin dir with "plugin":["./..."],
+# and the plugin default-exports async (input) => ({event: handler}). Events used:
+# tool.execute.after (posttool), session.idle (consolidate). The plugin file is
+# repo's extension/opencode.ts; the installer writes it into the project's
+# .opencode/plugins/ dir and points opencode.json at it. No prompt-text event exists,
+# so capture is implicit, like Cursor.
+OPENCODE = {
+    "key": "opencode",
+    "label": "OpenCode",
+    "kind": "opencode-plugin",
+    "home_env": None,
+    "config": lambda env: os.path.join(env.get("OPENCODE_HOME") or _default("~/.config/opencode", "OPENCODE_HOME"), "opencode.json"),
+    "wiring": {
+        "tool.execute.after": "sleep-posttool.sh",
+        "session.idle": "sleep-consolidate.sh",
+    },
+    "plugin_src": os.path.join(ROOT, "extension", "opencode.ts"),
+    "plugin_dest": lambda project: os.path.join(project, ".opencode", "plugins", "sleep-opencode.ts"),
+    "help": "Writes the sleep OpenCode TS plugin into the active project's .opencode/plugins and registers it in opencode.json.",
+}
 
-ALL_TARGETS = SHELL_HOOK_TARGETS + EXTENSION_TARGETS + CURSOR_TARGETS
+# Oh My Pi (can1357/oh-my-pi): a fork/rebrand of the pi agent. Same ExtensionAPI
+# (pi.on / pi.registerCommand) carries over; only the config home differs, .omp
+# instead of .omo/agent. The same TypeScript capture extension is linked. Confidence:
+# MEDIUM - fork source was not present locally to verify spellings; event names are
+# the canonical pi ones (tool_call/tool_result) which this repo has measured differ
+# from OmO's. Best-effort by user directive: a wrong event-name spelling surfaces as
+# an empty extension.log, which is user feedback.
+OH_MY_PI = {
+    "key": "oh-my-pi",
+    "label": "Oh My Pi",
+    "kind": "extension",
+    "home_env": "OMP_HOME",
+    "extension_dir": lambda env: os.path.join(env.get("OMP_HOME") or _default("~/.omp/agent", "OMP_HOME"), "extensions"),
+    "hooks_json": lambda env: os.path.join(env.get("OMP_HOME") or _default("~/.omp/agent", "OMP_HOME"), "hooks.json"),
+    "help": "Links the TypeScript capture extension into Oh My Pi's .omp extensions dir (best-effort).",
+}
+
+# Gemini CLI (measured, HIGH): the live ~/.gemini/settings.json on this machine has a
+# real "hooks" object in the SAME Claude-format grammar {event:[{matcher,hooks:[{type,
+# command,timeout}]}]}. The rtk-hook-gemini.sh runs on BeforeTool today; the Gemini hook
+# catalogue includes BeforePrompt (prompt/submit), BeforeTool/AfterTool (tool boundary),
+# and a session-end hook. We wire BeforePrompt -> capture, AfterTool -> posttool, and the
+# session-end hook -> consolidate. Config lives at $GEMINI_HOME (~/.gemini)/settings.json.
+# Risk: Gemini ignores the whole file if malformed, and merge must preserve theme/auth keys.
+GEMINI = {
+    "key": "gemini",
+    "label": "Gemini CLI",
+    "kind": "shell-hook",
+    "home_env": "GEMINI_HOME",
+    "config": lambda env: os.path.join(env.get("GEMINI_HOME") or _default("~/.gemini", "GEMINI_HOME"), "settings.json"),
+    "wiring": {
+        "BeforePrompt": "sleep-capture.sh",
+        "AfterTool": "sleep-posttool.sh",
+        "SessionEnd": "sleep-consolidate.sh",
+    },
+    "help": "Wires BeforePrompt/AfterTool/SessionEnd hooks into ~/.gemini/settings.json (Claude-format hooks object, measured HIGH).",
+}
+
+# Windsurf (measured, HIGH): the live ~/.codeium/windsurf/hooks.json has a "hooks" object
+# mapping snake_case events -> [{command: <abs shell string>}] (no matcher, no timeout
+# field in the measured grammar). post_write_code fires after code is written, and
+# pre_user_prompt before a user prompt is sent (the capture boundary). A session-end
+# event exists in the same grammar. Because this grammar differs from Claude's (bare
+# {command} entries, no wrapper "hooks"/"type"), it cannot reuse wire.merge's entry shape;
+# it needs a dedicated windsurf writer (like cursor has one).
+WINDSURF = {
+    "key": "windsurf",
+    "label": "Windsurf",
+    "kind": "windsurf-hooks",
+    "home_env": "WINDSURF_HOME",
+    "config": lambda env: os.path.join(env.get("WINDSURF_HOME") or _default("~/.codeium/windsurf", "WINDSURF_HOME"), "hooks.json"),
+    "wiring": {
+        "pre_user_prompt": "sleep-capture.sh",
+        "post_write_code": "sleep-posttool.sh",
+    },
+    "help": "Writes pre_user_prompt/post_write_code entries into ~/.codeium/windsurf/hooks.json (measured HIGH).",
+}
+
+# Codex CLI (MEDIUM, docs+reference config): ~/.codex/config.toml. There is NO per-turn
+# hook; the only on-event mechanism is [notify] { command, on_complete=true } which runs
+# a one-shot shell command when a run finishes. That cannot drive per-turn capture, so this
+# is a best-effort wiring that fires the consolidate on completion. It is a TOML file, not
+# JSON, so it needs its own writer (the [notify] section is a plain table).
+CODEX = {
+    "key": "codex",
+    "label": "Codex CLI",
+    "kind": "codex-notify",
+    "home_env": "CODEX_HOME",
+    "config": lambda env: os.path.join(env.get("CODEX_HOME") or _default("~/.codex", "CODEX_HOME"), "config.toml"),
+    "wiring": {
+        "on_complete": "sleep-consolidate.sh",
+    },
+    "help": "Adds a [notify] block to ~/.codex/config.toml that runs the consolidator on run completion (one-shot, not per-turn capture).",
+}
+
+def _cline_config(env: dict, platform: str | None = None) -> str:
+    """Return the VS Code user settings path Cline reads on each desktop OS."""
+    explicit = env.get("CLINE_HOME")
+    if explicit:
+        return os.path.join(explicit, "settings.json")
+    platform = platform or sys.platform
+    home = env.get("HOME") or os.path.expanduser("~")
+    if platform == "darwin":
+        base = os.path.join(home, "Library", "Application Support", "Code", "User")
+    elif platform in ("win32", "cygwin"):
+        appdata = env.get("APPDATA") or os.path.join(env.get("USERPROFILE") or home,
+                                                     "AppData", "Roaming")
+        base = os.path.join(appdata, "Code", "User")
+    else:
+        base = os.path.join(env.get("XDG_CONFIG_HOME") or os.path.join(home, ".config"),
+                            "Code", "User")
+    return os.path.join(base, "settings.json")
+
+
+# Cline (VS Code extension, LOW): settings live in the VS Code User settings JSON
+# (platform-specific VS Code User settings path). Cline exposes cline.execute.actions: an event map
+# where keys like blocked / request_created / web_view_updated map to {command}. Only
+# request_created approximates prompt-submit; there is no session-end event. Best-effort;
+# wiring it is low-confidence and the key must live among the VS Code settings, not the
+# extension's globalStorage.
+CLINE = {
+    "key": "cline",
+    "label": "Cline",
+    "kind": "cline-actions",
+    "home_env": "CLINE_HOME",
+    "config": _cline_config,
+    "wiring": {
+        "request_created": "sleep-capture.sh",
+    },
+    "help": "Adds a cline.execute.actions entry to VS Code user settings so Cline runs capture on request_created (low confidence).",
+}
+
+SHELL_HOOK_TARGETS = [CLAUDE, GEMINI]
+EXTENSION_TARGETS = [PI, OH_MY_PI]
+CURSOR_TARGETS = [CURSOR]
+OPENCODE_TARGETS = [OPENCODE]
+WINDSURF_TARGETS = [WINDSURF]
+CODEX_TARGETS = [CODEX]
+CLINE_TARGETS = [CLINE]
+
+ALL_TARGETS = (SHELL_HOOK_TARGETS + EXTENSION_TARGETS + CURSOR_TARGETS + OPENCODE_TARGETS
+               + WINDSURF_TARGETS + CODEX_TARGETS + CLINE_TARGETS)
 
 
 def by_key(key: str) -> dict | None:

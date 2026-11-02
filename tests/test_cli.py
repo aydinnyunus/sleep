@@ -32,6 +32,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import tomllib
 import time
 import unittest
 
@@ -43,6 +44,14 @@ UNINSTALL = os.path.join(REPO, "uninstall.sh")
 HOOKS = os.path.join(REPO, "hooks")
 PY = sys.executable
 REAL_CLAUDE_SETTINGS = os.path.expanduser("~/.claude-work/settings.json")
+REAL_AGENT_CONFIGS = [
+    os.path.expanduser("~/.gemini/settings.json"),
+    os.path.expanduser("~/.cursor/hooks.json"),
+    os.path.expanduser("~/.codeium/windsurf/hooks.json"),
+    os.path.expanduser("~/.codex/config.toml"),
+    os.path.expanduser("~/.config/Code/User/settings.json"),
+    os.path.expanduser("~/.config/opencode/opencode.json"),
+]
 
 # tools/wire.py WIRING, restated here so the test fails when the product silently
 # moves an event to another profile. The pi/omo profile must gain nothing at all:
@@ -127,6 +136,8 @@ class Sandbox(unittest.TestCase):
                        "SLEEP_MIN_INTERVAL", "SLEEP_MODEL", "SLEEP_SESSION",
                        "SLEEP_MEMORY_DIR", "SLEEP_HOME", "SLEEP_TEST_MODEL_MARKER",
                        "CLAUDE_HOME", "OMO_HOME", "CLAUDE_CONFIG_DIR", "CLAUDE_BIN",
+                       "GEMINI_HOME", "WINDSURF_HOME", "CODEX_HOME", "CLINE_HOME",
+                       "OPENCODE_HOME", "OMP_HOME", "SLEEP_PROJECT",
                        "ANTHROPIC_MODEL", "SENPI_RPC_HOST_INSTANCE_ID"):
             env.pop(leaked, None)
         env.update({
@@ -967,6 +978,105 @@ class WireProfile(Sandbox):
         self.assertEqual(doc["hooks"]["afterFileEdit"], [{"matcher": "*", "notACommand": True}],
                          "an unrecognized cursor entry shape is left alone")
 
+    def test_windsurf_grammar_wires_and_removes(self):
+        """--kind windsurf writes bare {command} entries into the hooks object."""
+        path = os.path.join(self.claude_home, "windsurf-hooks.json")
+        self.write_json(path, {"hooks": {}})
+        before = digest(path)
+        got = self.wire(path, "--kind", "windsurf", "--dry-run")
+        self.assertEqual(got.returncode, 0, got.stderr)
+        self.assertIn("pre_user_prompt: added", got.stdout)
+        self.assertIn("post_write_code: added", got.stdout)
+        self.assertEqual(digest(path), before, "dry-run must not write")
+        got = self.wire(path, "--kind", "windsurf")
+        self.assertEqual(got.returncode, 0, got.stderr)
+        hooks = self.read_json(path)["hooks"]
+        self.assertEqual(sorted(hooks), ["post_write_code", "pre_user_prompt"])
+        cmds = {ev: [e["command"] for e in lst] for ev, lst in hooks.items()}
+        self.assertIn(os.path.join(REPO, "hooks", "sleep-capture.sh"), cmds["pre_user_prompt"])
+        self.assertIn(os.path.join(REPO, "hooks", "sleep-posttool.sh"), cmds["post_write_code"])
+        got = self.wire(path, "--kind", "windsurf", "--remove")
+        self.assertEqual(got.returncode, 0, got.stderr)
+        self.assertEqual(self.read_json(path)["hooks"], {})
+
+    def test_cline_wires_request_created_into_vscode_settings(self):
+        path = os.path.join(self.claude_home, "cline-settings.json")
+        self.write_json(path, {"editor.fontSize": 14, "cline.execute.actions": {}})
+        got = self.wire(path, "--kind", "cline")
+        self.assertEqual(got.returncode, 0, got.stderr)
+        doc = self.read_json(path)
+        self.assertEqual(doc["cline.execute.actions"]["request_created"]["command"],
+                         os.path.join(REPO, "hooks", "sleep-capture.sh"))
+        self.assertEqual(doc["editor.fontSize"], 14, "unrelated setting must survive")
+        got = self.wire(path, "--kind", "cline", "--remove")
+        self.assertEqual(got.returncode, 0, got.stderr)
+        self.assertNotIn("cline.execute.actions", self.read_json(path))
+
+    def test_codex_wires_a_notify_block_and_removes_it(self):
+        """--kind codex edits the TOML [notify] section (text), not the JSON doc."""
+        path = os.path.join(self.claude_home, "codex-config.toml")
+        src_text = "model = \"gpt-5\"\ntemperature = 0.2\n"
+        self.write(path, src_text)
+        got = self.wire(path, "--kind", "codex", "--dry-run")
+        self.assertEqual(got.returncode, 0, got.stderr)
+        self.assertEqual(self.read(path), src_text, "dry-run must not write TOML")
+        got = self.wire(path, "--kind", "codex")
+        self.assertEqual(got.returncode, 0, got.stderr)
+        out = self.read(path)
+        self.assertIn("[notify]", out)
+        self.assertIn("command = \"%s\"" % os.path.join(REPO, "hooks", "sleep-consolidate.sh"), out)
+        self.assertIn("on_complete = true", out)
+        self.assertIn("model = \"gpt-5\"", out, "existing config must survive")
+        got = self.wire(path, "--kind", "codex", "--remove")
+        self.assertEqual(got.returncode, 0, got.stderr)
+        self.assertNotIn("[notify]", self.read(path))
+
+    def test_cursor_and_windsurf_removal_preserve_foreign_wrappers(self):
+        wrapped_cursor = "python3 %s --foreign" % os.path.join(
+            REPO, "hooks", "sleep-consolidate.sh")
+        cursor = self.cursor_doc(hooks={
+            "sessionEnd": [{"type": "command", "command": wrapped_cursor,
+                            "matcher": ".*", "timeout": 30}],
+        })
+        got = self.wire(cursor, "--cursor", "--remove")
+        self.assertEqual(got.returncode, 0, got.stderr)
+        self.assertIn("sessionEnd", self.read_json(cursor)["hooks"])
+
+        windsurf = os.path.join(self.claude_home, "windsurf-wrapper.json")
+        wrapped = "sh -c '%s --foreign'" % os.path.join(REPO, "hooks", "sleep-capture.sh")
+        self.write_json(windsurf, {"hooks": {"pre_user_prompt": [{"command": wrapped}]}})
+        got = self.wire(windsurf, "--kind", "windsurf", "--remove")
+        self.assertEqual(got.returncode, 0, got.stderr)
+        self.assertEqual(self.read_json(windsurf)["hooks"]["pre_user_prompt"][0]["command"],
+                         wrapped)
+
+    def test_cline_refuses_non_object_and_foreign_action_shapes(self):
+        for value in ("legacy-command", {"command": "/usr/bin/echo foreign"}):
+            path = os.path.join(self.claude_home, "cline-%s.json" % type(value).__name__)
+            self.write_json(path, {"cline.execute.actions": {"request_created": value}})
+            before = digest(path)
+            got = self.wire(path, "--kind", "cline")
+            self.assertEqual(got.returncode, 0, got.stderr)
+            self.assertIn("left alone", got.stdout)
+            self.assertEqual(digest(path), before)
+
+    def test_codex_preserves_foreign_notify_and_escapes_windows_paths(self):
+        foreign = os.path.join(self.claude_home, "codex-foreign.toml")
+        original = '[notify]\ncommand = "/usr/bin/echo"\non_complete = true\nextra = "keep"\n'
+        self.write(foreign, original)
+        got = self.wire(foreign, "--kind", "codex")
+        self.assertEqual(got.returncode, 0, got.stderr)
+        self.assertIn("occupied by another command", got.stdout)
+        self.assertEqual(self.read(foreign), original)
+        self.assertEqual(tomllib.loads(self.read(foreign))["notify"]["extra"], "keep")
+
+        windows = os.path.join(self.claude_home, "codex-windows.toml")
+        self.write(windows, 'model = "gpt-5"\n')
+        got = self.wire(windows, "--kind", "codex", "--root", r"C:\Users\Yunus\sleep")
+        self.assertEqual(got.returncode, 0, got.stderr)
+        parsed = tomllib.loads(self.read(windows))
+        self.assertIn(r"C:\Users\Yunus\sleep", parsed["notify"]["command"])
+
     def test_cursor_ignores_a_non_version_one_hook_doc_shape(self):
         # a doc whose hooks is not a dict should not crash and should report left alone
         weird = os.path.join(self.claude_home, "cursor-weird.json")
@@ -1129,6 +1239,244 @@ class InstallUninstall(Sandbox):
         self.assertEqual(got.returncode, 0, (got.stdout + got.stderr)[-1800:])
         self.assertEqual(self.read_json(cursor_path)["hooks"], {},
                          "uninstall must clear the cursor entries")
+
+    def install_opencode(self, *flags, **env):
+        """Install against self.proj_a as the OpenCode project root."""
+        return self.bash(INSTALL, "--skip-tests", *flags, SLEEP_PROJECT=self.proj_a, **env)
+
+    def uninstall_opencode(self, *flags, **env):
+        return self.bash(UNINSTALL, *flags, SLEEP_PROJECT=self.proj_a, **env)
+
+    def test_install_wires_opencode_and_oh_my_pi_when_selected(self):
+        """--agents opencode,oh-my-pi writes the OpenCode TS plugin into the project and
+        links the capture extension into Oh My Pi's .omp extensions dir."""
+        got = self.install_opencode("--agents", "opencode,oh-my-pi")
+        self.assertEqual(got.returncode, 0, (got.stdout + got.stderr)[-1800:])
+        # OpenCode plugin file copied into the project
+        plugin = os.path.join(self.proj_a, ".opencode", "plugins", "sleep-opencode.ts")
+        self.assertTrue(os.path.isfile(plugin), "opencode plugin must be written")
+        plugin_text = self.read(plugin)
+        self.assertIn("export default", plugin_text)
+        self.assertIn(json.dumps(sys.executable), plugin_text)
+        self.assertNotIn("__SLEEP_PYTHON__", plugin_text)
+        # Oh My Pi extension link (OMP_HOME)
+        omphome = os.path.join(self.home, ".omp", "agent")
+        link = os.path.join(omphome, "extensions", "sleep")
+        self.assertTrue(os.path.islink(link), "oh-my-pi extension must be linked")
+        self.assertEqual(os.path.realpath(link), os.path.join(REPO, "extension"))
+
+    def test_install_opencode_registers_the_plugin_dir(self):
+        oc_conf = os.path.join(self.proj_a, ".opencode", "opencode.json")
+        entry = "./.opencode/plugins"
+        self.write_json(oc_conf, {"version": 1, "plugin": []})
+        got = self.install_opencode("--agents", "opencode")
+        self.assertEqual(got.returncode, 0, got.stdout + got.stderr)
+        doc = self.read_json(oc_conf)
+        self.assertIn(entry, doc["plugin"], "opencode.json must register the plugin dir")
+
+    def test_uninstall_removes_opencode_plugin_and_oh_my_pi_extension(self):
+        installed = self.install_opencode("--agents", "opencode,oh-my-pi")
+        self.assertEqual(installed.returncode, 0, installed.stdout + installed.stderr)
+        link = os.path.join(self.home, ".omp", "agent", "extensions", "sleep")
+        plugin = os.path.join(self.proj_a, ".opencode", "plugins", "sleep-opencode.ts")
+        oc_conf = os.path.join(self.proj_a, ".opencode", "opencode.json")
+        self.assertTrue(os.path.islink(link))
+        self.assertTrue(os.path.isfile(plugin))
+        removed = self.uninstall_opencode()
+        self.assertEqual(removed.returncode, 0, removed.stdout + removed.stderr)
+        self.assertFalse(os.path.islink(link), "oh-my-pi extension link must be removed")
+        self.assertFalse(os.path.exists(plugin), "opencode plugin file must be removed")
+        self.assertEqual(self.read_json(oc_conf)["plugin"], [],
+                         "opencode.json must drop the plugin dir on uninstall")
+        self.assertEqual(len(glob.glob(oc_conf + ".bak-*")), 1)
+
+    def test_install_wires_gemini_and_windsurf_when_selected(self):
+        """--agents gemini,windsurf writes Gemini's Claude-format hooks into settings.json
+        and Windsurf's bare-{command} hooks into hooks.json; claude stays wired."""
+        gsettings = os.path.join(self.home, ".gemini", "settings.json")
+        self.write_json(gsettings, {"theme": "GitHub", "selectedAuthType": "oauth-personal"})
+        wsurf = os.path.join(self.home, ".codeium", "windsurf", "hooks.json")
+        self.write_json(wsurf, {"hooks": {}})
+        got = self.install("--agents", "claude,gemini,windsurf")
+        self.assertEqual(got.returncode, 0, (got.stdout + got.stderr)[-2000:])
+        # claude still wired
+        for event in EVENTS:
+            self.assertIn(sleep_command(event), self.sleep_commands_in(self.settings_path))
+        # gemini: Claude-format hooks object preserved theme/auth
+        gdoc = self.read_json(gsettings)
+        self.assertEqual(gdoc["theme"], "GitHub")
+        self.assertEqual(gdoc["selectedAuthType"], "oauth-personal")
+        ghooks = gdoc["hooks"]
+        self.assertIn("BeforePrompt", ghooks)
+        self.assertIn("AfterTool", ghooks)
+        self.assertIn("SessionEnd", ghooks)
+        self.assertEqual(len(glob.glob(gsettings + ".bak-*")), 1)
+        # windsurf
+        wdoc = self.read_json(wsurf)
+        self.assertIn("pre_user_prompt", wdoc["hooks"])
+        self.assertIn("post_write_code", wdoc["hooks"])
+
+    def test_extension_dry_run_preserves_existing_links(self):
+        for base, label in ((self.omo_home, "pi"),
+                            (os.path.join(self.home, ".omp", "agent"), "oh-my-pi")):
+            dest = os.path.join(base, "extensions", "sleep")
+            foreign = self.mk("foreign-" + label)
+            os.makedirs(os.path.dirname(dest), exist_ok=True)
+            os.symlink(foreign, dest, target_is_directory=True)
+        got = self.install("--dry-run", "--agents", "pi,oh-my-pi")
+        self.assertEqual(got.returncode, 0, got.stdout + got.stderr)
+        self.assertEqual(os.path.realpath(os.path.join(self.omo_home, "extensions", "sleep")),
+                         os.path.realpath(os.path.join(self.tmp, "foreign-pi")))
+        self.assertEqual(os.path.realpath(os.path.join(self.home, ".omp", "agent",
+                                                       "extensions", "sleep")),
+                         os.path.realpath(os.path.join(self.tmp, "foreign-oh-my-pi")))
+
+    def test_pi_selection_does_not_install_oh_my_pi(self):
+        got = self.install("--agents", "pi")
+        self.assertEqual(got.returncode, 0, got.stdout + got.stderr)
+        self.assertTrue(os.path.islink(os.path.join(self.omo_home, "extensions", "sleep")))
+        self.assertFalse(os.path.lexists(os.path.join(self.home, ".omp", "agent",
+                                                      "extensions", "sleep")))
+
+    def test_uninstall_removes_gemini_events_and_preserves_other_settings(self):
+        gsettings = os.path.join(self.home, ".gemini", "settings.json")
+        self.write_json(gsettings, {"theme": "GitHub", "hooks": {"BeforeTool": [
+            {"hooks": [{"type": "command", "command": "/usr/bin/echo foreign"}]}]}})
+        installed = self.install("--agents", "gemini")
+        self.assertEqual(installed.returncode, 0, installed.stdout + installed.stderr)
+        removed = self.uninstall()
+        self.assertEqual(removed.returncode, 0, removed.stdout + removed.stderr)
+        doc = self.read_json(gsettings)
+        self.assertEqual(doc["theme"], "GitHub")
+        self.assertEqual(sorted(doc["hooks"]), ["BeforeTool"])
+
+    def test_opencode_uninstall_dry_run_is_read_only_and_cleans_old_global_config(self):
+        installed = self.install_opencode("--agents", "opencode")
+        self.assertEqual(installed.returncode, 0, installed.stdout + installed.stderr)
+        plugin = os.path.join(self.proj_a, ".opencode", "plugins", "sleep-opencode.ts")
+        project_cfg = os.path.join(self.proj_a, ".opencode", "opencode.json")
+        global_cfg = os.path.join(self.home, ".config", "opencode", "opencode.json")
+        self.write_json(global_cfg, {"plugin": ["./.opencode/plugins"], "theme": "keep"})
+        before = (digest(plugin), digest(project_cfg), digest(global_cfg))
+        dry = self.uninstall_opencode("--dry-run")
+        self.assertEqual(dry.returncode, 0, dry.stdout + dry.stderr)
+        self.assertEqual((digest(plugin), digest(project_cfg), digest(global_cfg)), before)
+        removed = self.uninstall_opencode()
+        self.assertEqual(removed.returncode, 0, removed.stdout + removed.stderr)
+        self.assertFalse(os.path.exists(plugin))
+        self.assertEqual(self.read_json(project_cfg)["plugin"], [])
+        self.assertEqual(self.read_json(global_cfg), {"plugin": [], "theme": "keep"})
+        self.assertEqual(len(glob.glob(project_cfg + ".bak-*")), 1)
+        self.assertEqual(len(glob.glob(global_cfg + ".bak-*")), 1)
+
+    def test_all_agent_install_is_idempotent(self):
+        real_before = {path: digest(path) for path in REAL_AGENT_CONFIGS if os.path.isfile(path)}
+        paths = {
+            "gemini": os.path.join(self.home, ".gemini", "settings.json"),
+            "cursor": os.path.join(self.home, ".cursor", "hooks.json"),
+            "windsurf": os.path.join(self.home, ".codeium", "windsurf", "hooks.json"),
+            "codex": os.path.join(self.home, ".codex", "config.toml"),
+            "cline": os.path.join(self.home, ".config", "Code", "User", "settings.json"),
+            "opencode": os.path.join(self.proj_a, ".opencode", "opencode.json"),
+        }
+        self.write_json(paths["gemini"], {"hooks": {}})
+        self.write_json(paths["cursor"], {"version": 1, "hooks": {}})
+        self.write_json(paths["windsurf"], {"hooks": {}})
+        self.write(paths["codex"], 'model = "gpt-5"\n')
+        self.write_json(paths["cline"], {"editor.fontSize": 14})
+        self.write_json(paths["opencode"], {"plugin": []})
+        keys = "claude,gemini,pi,oh-my-pi,cursor,opencode,windsurf,codex,cline"
+        first = self.install_opencode("--agents", keys)
+        self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
+        state = {name: digest(path) for name, path in paths.items()}
+        backups = {name: len(glob.glob(path + ".bak-*")) for name, path in paths.items()}
+        second = self.install_opencode("--agents", keys)
+        self.assertEqual(second.returncode, 0, second.stdout + second.stderr)
+        self.assertEqual({name: digest(path) for name, path in paths.items()}, state)
+        self.assertEqual({name: len(glob.glob(path + ".bak-*"))
+                          for name, path in paths.items()}, backups)
+        self.assertEqual({path: digest(path) for path in real_before}, real_before,
+                         "sandbox all-agent install must not touch real user configs")
+
+    def test_skill_dry_run_preserves_an_existing_directory(self):
+        target = self.skill_link()
+        keep = self.write(os.path.join(target, "KEEP.md"), "user-owned\n")
+        before = digest(keep)
+        got = self.install("--dry-run")
+        self.assertEqual(got.returncode, 0, got.stdout + got.stderr)
+        self.assertEqual(digest(keep), before)
+        self.assertTrue(os.path.isdir(target))
+        self.assertEqual(glob.glob(target + ".bak-*"), [])
+
+    def test_preflight_failure_aborts_install(self):
+        fail = os.path.join(self.bin, "failing-python")
+        self._make_script("failing-python", "#!/bin/sh\nprintf 'synthetic test failure\n' >&2\nexit 7\n")
+        code = (
+            "import sys; sys.path.insert(0, sys.argv[1]); import install; "
+            "install.sys.executable = sys.argv[2]; raise SystemExit(install.preflight(False))"
+        )
+        got = self._run([PY, "-c", code, os.path.join(REPO, "tools"), fail],
+                        stdin="", cwd=REPO, env=self.env())
+        self.assertEqual(got.returncode, 7)
+        self.assertIn("test gate failed with exit 7", got.stdout)
+        self.assertIn("synthetic test failure", got.stdout)
+
+    def test_cline_default_settings_path_is_platform_specific(self):
+        code = (
+            "import json,sys; sys.path.insert(0,sys.argv[1]); import agents; "
+            "home=sys.argv[2]; print(json.dumps({"
+            "'mac':agents._cline_config({'HOME':home},'darwin'),"
+            "'linux':agents._cline_config({'HOME':home},'linux'),"
+            "'win':agents._cline_config({'HOME':home,'APPDATA':home+'/Roaming'},'win32')}))"
+        )
+        got = self._run([PY, "-c", code, os.path.join(REPO, "tools"), self.home],
+                        stdin="", cwd=REPO, env=self.env())
+        self.assertEqual(got.returncode, 0, got.stderr)
+        paths = json.loads(got.stdout)
+        self.assertEqual(paths["mac"], os.path.join(self.home, "Library", "Application Support",
+                                                    "Code", "User", "settings.json"))
+        self.assertEqual(paths["linux"], os.path.join(self.home, ".config", "Code", "User",
+                                                      "settings.json"))
+        self.assertEqual(paths["win"], os.path.join(self.home, "Roaming", "Code", "User",
+                                                    "settings.json"))
+
+    def test_linux_cron_install_is_idempotent_and_uninstall_removes_the_owned_block(self):
+        state = self.write(self.at("crontab.txt"),
+                           "17 2 * * * /usr/bin/echo foreign\n"
+                           "# aydinnyunus-sleep-nightly\n"
+                           "3 41 * * * /old/sleep.py nightly\n")
+        self._make_script("crontab", '#!/bin/sh\nif [ "$1" = "-l" ]; then cat "$CRON_STATE"; exit 0; fi\nif [ "$1" = "-" ]; then cat > "$CRON_STATE"; exit 0; fi\nexit 2\n')
+        code = (
+            "import pathlib,sys; sys.path.insert(0,sys.argv[1]); import install,uninstall; "
+            "install.RUN=True; install.SLEEP_HOME=sys.argv[2]; install.scheduler_linux(True); "
+            "p=pathlib.Path(sys.argv[3]); first=p.read_text(); install.scheduler_linux(True); "
+            "second=p.read_text(); assert first==second; assert first.count(install.CRON_BEGIN)==1; "
+            "assert first.count('sleep.py nightly')==1; uninstall.RUN=True; "
+            "raise SystemExit(uninstall.remove_scheduler_linux())"
+        )
+        got = self._run([PY, "-c", code, os.path.join(REPO, "tools"), self.sleep_home, state],
+                        stdin="", cwd=REPO, env=self.env(CRON_STATE=state))
+        self.assertEqual(got.returncode, 0, got.stdout + got.stderr)
+        self.assertEqual(self.read(state), "17 2 * * * /usr/bin/echo foreign\n")
+
+    def test_linux_cron_refuses_an_unterminated_owned_block(self):
+        original = ("# BEGIN aydinnyunus-sleep-nightly\n"
+                    "3 41 * * * /old/sleep.py nightly\n"
+                    "17 2 * * * /usr/bin/foreign-job\n")
+        state = self.write(self.at("crontab-malformed.txt"), original)
+        self._make_script("crontab", '#!/bin/sh\nif [ "$1" = "-l" ]; then cat "$CRON_STATE"; exit 0; fi\nif [ "$1" = "-" ]; then cat > "$CRON_STATE"; exit 0; fi\nexit 2\n')
+        code = (
+            "import sys; sys.path.insert(0,sys.argv[1]); import install,uninstall; "
+            "install.RUN=True; install.SLEEP_HOME=sys.argv[2]; "
+            "assert install.scheduler_linux(True)==1; uninstall.RUN=True; "
+            "assert uninstall.remove_scheduler_linux()==1"
+        )
+        got = self._run([PY, "-c", code, os.path.join(REPO, "tools"), self.sleep_home],
+                        stdin="", cwd=REPO, env=self.env(CRON_STATE=state))
+        self.assertEqual(got.returncode, 0, got.stdout + got.stderr)
+        self.assertIn("unterminated sleep cron block", got.stdout)
+        self.assertEqual(self.read(state), original,
+                         "malformed owned block must leave later foreign jobs byte-identical")
 
     def test_install_dry_run_and_an_unknown_flag_change_nothing(self):
         before_settings, before_omo = digest(self.settings_path), digest(self.omo_hooks)

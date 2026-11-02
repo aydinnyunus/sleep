@@ -16,6 +16,7 @@ already promoted). Pass --purge to move it to ~/.sleep-pre-purge-<ts> instead.
 
 Mirror of tools/install.py; the same uninstall runs on macOS, Linux, Windows.
 """
+import json
 import os
 import shutil
 import subprocess
@@ -52,6 +53,20 @@ def step(title):
     print("\n== " + title)
 
 
+def write_json_backed(path, doc):
+    if not RUN:
+        print("  would: update %s" % path)
+        return
+    backup = "%s.bak-%s-sleep" % (path, time.strftime("%Y%m%dT%H%M%S"))
+    shutil.copy2(path, backup)
+    tmp = path + ".sleep-tmp"
+    with open(tmp, "w", encoding="utf-8") as handle:
+        json.dump(doc, handle, indent=2, ensure_ascii=False)
+        handle.write("\n")
+    os.replace(tmp, path)
+    print("  updated %s (backup %s)" % (path, os.path.basename(backup)))
+
+
 def remove_symlink_or_move(path, label):
     if os.path.islink(path):
         if RUN:
@@ -68,19 +83,77 @@ def remove_symlink_or_move(path, label):
             print("  would: move " + label + " -> " + dest.replace(path, "<path>"))
 
 
+CRON_BEGIN = "# BEGIN aydinnyunus-sleep-nightly"
+CRON_END = "# END aydinnyunus-sleep-nightly"
+CRON_LEGACY_MARKER = "# aydinnyunus-sleep-nightly"
+
+
+def _strip_sleep_cron(lines):
+    """Remove only complete owned blocks plus the legacy marker/command pair."""
+    out, i = [], 0
+    while i < len(lines):
+        line = lines[i]
+        if line == CRON_BEGIN:
+            try:
+                end = lines.index(CRON_END, i + 1)
+            except ValueError as exc:
+                raise ValueError("unterminated sleep cron block") from exc
+            i = end + 1
+            continue
+        if line == CRON_LEGACY_MARKER:
+            i += 1
+            if i < len(lines) and "sleep.py" in lines[i] and "nightly" in lines[i]:
+                i += 1
+            continue
+        out.append(line)
+        i += 1
+    return out
+
+
+def remove_scheduler_linux():
+    try:
+        result = subprocess.run(["crontab", "-l"], capture_output=True, text=True)
+    except FileNotFoundError:
+        print("  no cron nightly entry present")
+        return 0
+    current = result.stdout if result.returncode == 0 else ""
+    original = current.splitlines()
+    try:
+        kept = _strip_sleep_cron(original)
+    except ValueError as exc:
+        print("  refused cron cleanup: %s" % exc)
+        return 1
+    if kept == original:
+        print("  no cron nightly entry present")
+        return 0
+    body = "\n".join(kept).strip() + "\n" if kept else ""
+    if RUN:
+        written = subprocess.run(["crontab", "-"], input=body, capture_output=True, text=True)
+        if written.returncode != 0:
+            print("  !! crontab write failed: " + written.stderr.strip())
+            return 1
+    print("  would: remove cron marker block" if not RUN else "  removed cron marker block")
+    return 0
+
+
 def uninstall():
     step("capture hooks")
     for target in agents.ALL_TARGETS:
-        if target["kind"] == "extension":
-            # extension links are removed by the "extension" step below
+        kind = target["kind"]
+        if kind in ("extension", "opencode-plugin"):
+            # links/plugin files are removed by later steps below
             continue
         cfg = target["config"](os.environ)
         if not os.path.exists(cfg):
             continue
         wiring = {ev: (script, target["key"]) for ev, script in target["wiring"].items()}
-        if target["kind"] == "cursor-hooks":
+        if kind == "cursor-hooks":
             run([sys.executable, os.path.join(ROOT, "tools", "wire.py"), "--settings", cfg,
                  "--cursor", "--remove"] + (["--dry-run"] if not RUN else []))
+        elif kind in ("windsurf-hooks", "cline-actions", "codex-notify"):
+            run([sys.executable, os.path.join(ROOT, "tools", "wire.py"), "--settings", cfg,
+                 "--kind", {"windsurf-hooks": "windsurf", "cline-actions": "cline", "codex-notify": "codex"}[kind],
+                 "--remove"] + (["--dry-run"] if not RUN else []))
         else:
             run([sys.executable, os.path.join(ROOT, "tools", "wire.py"), "--settings", cfg,
                  "--profile", "all", "--remove", "--events", ",".join(wiring.keys())]
@@ -90,6 +163,36 @@ def uninstall():
     if os.path.exists(omo_hooks):
         run([sys.executable, os.path.join(ROOT, "tools", "wire.py"), "--settings", omo_hooks,
              "--profile", "pi", "--remove"] + (["--dry-run"] if not RUN else []))
+
+    step("opencode plugin")
+    opencode = agents.by_key("opencode")
+    if opencode is not None:
+        project = os.environ.get("SLEEP_PROJECT") or os.getcwd()
+        plugin_file = opencode["plugin_dest"](project)
+        if os.path.isfile(plugin_file):
+            if RUN:
+                os.remove(plugin_file)
+                print("  removed opencode plugin")
+            else:
+                print("  would: remove opencode plugin")
+        # Current installs are project-scoped. Also clean the old global path for
+        # installs made by the pre-fix implementation.
+        configs = [
+            os.path.join(project, ".opencode", "opencode.json"),
+            opencode["config"](os.environ),
+        ]
+        for oc_conf in dict.fromkeys(configs):
+            if not os.path.isfile(oc_conf):
+                continue
+            try:
+                doc = json.load(open(oc_conf, encoding="utf-8"))
+                runs = doc.get("plugin") or []
+                if isinstance(runs, list) and "./.opencode/plugins" in runs:
+                    doc["plugin"] = [e for e in runs if e != "./.opencode/plugins"]
+                    write_json_backed(oc_conf, doc)
+                    print("  unregistered plugin dir from %s" % oc_conf)
+            except (OSError, ValueError) as exc:
+                print("  skip opencode.json unregister: %s" % exc)
 
     step("skill")
     remove_symlink_or_move(os.path.join(CLAUDE_HOME, "skills", "sleep"), "skill symlink")
@@ -105,29 +208,17 @@ def uninstall():
         else:
             print("  no LaunchAgent plist present")
     elif IS_LINUX:
-        try:
-            r = subprocess.run(["crontab", "-l"], capture_output=True, text=True)
-            have = "# aydinnyunus-sleep-nightly" in r.stdout
-        except FileNotFoundError:
-            have = False
-        if have:
-            lines = [ln for ln in r.stdout.splitlines() if "# aydinnyunus-sleep-nightly" not in ln]
-            body = "\n".join(lines).strip() + "\n" if lines else ""
-            if RUN:
-                p = subprocess.run(["crontab", "-"], input=body, capture_output=True, text=True)
-                if p.returncode != 0:
-                    print("  !! crontab write failed: " + p.stderr.strip())
-                    return 1
-            print("  removed cron marker block")
-        else:
-            print("  no cron nightly entry present")
+        if remove_scheduler_linux() != 0:
+            return 1
     elif IS_WIN:
         run(["schtasks", "/delete", "/tn", "aydinnyunus-sleep-nightly", "/f"])
     else:
         print("  unsupported platform for scheduler; skipping")
 
-    step("pi extension")
-    remove_symlink_or_move(os.path.join(OMO_HOME, "extensions", "sleep"), "extension")
+    step("extensions")
+    for target in agents.EXTENSION_TARGETS:
+        ext_dir = target["extension_dir"](os.environ)
+        remove_symlink_or_move(os.path.join(ext_dir, "sleep"), "%s extension" % target["key"])
 
     print("\nuninstalled. promoted memory files were left exactly as they are; "
           "git revert in the memory repo is the way back.")

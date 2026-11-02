@@ -168,9 +168,12 @@ def preflight(skip_tests: bool) -> int:
     if not skip_tests:
         r = subprocess.run([sys.executable, "-m", "unittest", "discover", "-s", "tests"],
                            cwd=ROOT, capture_output=True, text=True)
-        tail = (r.stdout or "").strip().splitlines()[-3:] or [r.stderr.strip()]
-        for ln in tail:
+        combined = "\n".join(part for part in (r.stdout, r.stderr) if part).strip().splitlines()
+        for ln in combined[-5:]:
             print("  " + ln)
+        if r.returncode != 0:
+            print("  test gate failed with exit %s; install aborted" % r.returncode)
+            return r.returncode
     return 0
 
 def state_dirs():
@@ -184,13 +187,15 @@ def state_dirs():
 def skill_link():
     step("Layer 1 - skill")
     target = os.path.join(CLAUDE_HOME, "skills", "sleep")
-    if os.path.lexists(target) and not os.path.islink(target):
-        os.rename(target, target + ".bak-" + stamp())
-        print("  existing %s kept aside" % target)
     if not RUN:
+        if os.path.lexists(target) and not os.path.islink(target):
+            print("  would: move existing %s aside" % target)
         print("  would: mkdir -p %s/skills" % CLAUDE_HOME)
         print("  would: ln -sfn %s  %s" % (os.path.join(ROOT, "shared-skill", "sleep"), target))
         return
+    if os.path.lexists(target) and not os.path.islink(target):
+        os.rename(target, target + ".bak-" + stamp())
+        print("  existing %s kept aside" % target)
     os.makedirs(os.path.join(CLAUDE_HOME, "skills"), exist_ok=True)
     if os.path.islink(target):
         os.remove(target)
@@ -234,6 +239,105 @@ def wire_cursor_hook(target: dict):
         _write_json_backed(cfg, doc)
 
 
+def _opencode_project():
+    """Resolve the OpenCode project root: $SLEEP_PROJECT, else the cwd (this is a
+    project-scoped plugin, unlike the global config of the other agents)."""
+    explicit = os.environ.get("SLEEP_PROJECT")
+    if explicit:
+        return os.path.abspath(explicit)
+    # prefer a cwd that actually has .opencode, otherwise the install cwd
+    return os.getcwd()
+
+
+def wire_opencode_hook(target: dict):
+    """Install and register the OpenCode plugin inside the selected project."""
+    project = _opencode_project()
+    plugin_dir = os.path.join(project, ".opencode", "plugins")
+    dest = os.path.join(plugin_dir, "sleep-opencode.ts")
+    src_file = target["plugin_src"]
+    if not os.path.isfile(src_file):
+        print("  skip: %s missing (repo plugin not found)" % src_file)
+        return
+    source = open(src_file, encoding="utf-8").read()
+    rendered = (source
+                .replace(json.dumps("__SLEEP_REPO__"), json.dumps(ROOT))
+                .replace(json.dumps("__SLEEP_PYTHON__"), json.dumps(sys.executable or "python3")))
+    if RUN:
+        os.makedirs(plugin_dir, exist_ok=True)
+        current = open(dest, encoding="utf-8").read() if os.path.isfile(dest) else None
+        if current != rendered:
+            with open(dest, "w", encoding="utf-8") as h:
+                h.write(rendered)
+            print("  wrote plugin %s" % dest)
+        else:
+            print("  %s already matches, unchanged" % dest)
+    else:
+        print("  would: render %s -> %s" % (src_file, dest))
+
+    cfg = os.path.join(project, ".opencode", "opencode.json")
+    doc = json.load(open(cfg, encoding="utf-8")) if os.path.isfile(cfg) else {}
+    runs = doc.get("plugin") or []
+    if not isinstance(runs, list):
+        print("  skip: %s plugin key is not a list" % cfg)
+        return
+    entry = "./.opencode/plugins"
+    if entry not in runs:
+        doc["plugin"] = runs + [entry]
+        _write_json_backed(cfg, doc)
+        print("  registered plugin dir in %s" % cfg)
+    else:
+        print("  %s already registers ./.opencode/plugins" % cfg)
+
+
+def wire_windsurf_hook(target: dict):
+    """Windsurf ~/.codeium/windsurf/hooks.json (bare {command} entries)."""
+    cfg = target["config"](os.environ)
+    if not os.path.isfile(cfg):
+        print("  skip: %s does not exist" % cfg)
+        return
+    doc = json.load(open(cfg, encoding="utf-8"))
+    report = wire.wire_windsurf(doc, ROOT, remove=False, events=tuple(target["wiring"].keys()))
+    for ln in report:
+        print("  %s: %s" % (os.path.basename(cfg), ln))
+    if any("added" in r for r in report):
+        _write_json_backed(cfg, doc)
+
+
+def wire_cline_hook(target: dict):
+    """Cline VS Code user settings (cline.execute.actions map)."""
+    cfg = target["config"](os.environ)
+    if not os.path.isfile(cfg):
+        print("  skip: %s does not exist" % cfg)
+        return
+    doc = json.load(open(cfg, encoding="utf-8"))
+    report = wire.wire_cline(doc, ROOT, remove=False, events=tuple(target["wiring"].keys()))
+    for ln in report:
+        print("  %s: %s" % (os.path.basename(cfg), ln))
+    if any("added" in r for r in report):
+        _write_json_backed(cfg, doc)
+
+
+def wire_codex_hook(target: dict):
+    """Codex ~/.codex/config.toml [notify] block (TOML, not JSON)."""
+    cfg = target["config"](os.environ)
+    if not os.path.isfile(cfg):
+        print("  skip: %s does not exist" % cfg)
+        return
+    text = open(cfg, encoding="utf-8").read()
+    msgs, new_text, changed = wire.wire_codex(text, ROOT, remove=False)
+    for ln in msgs:
+        print("  %s: %s" % (os.path.basename(cfg), ln))
+    if changed and RUN:
+        backup = "%s.bak-%s-sleep" % (cfg, stamp())
+        shutil.copy2(cfg, backup)
+        with open(cfg + ".sleep-tmp", "w", encoding="utf-8") as h:
+            h.write(new_text)
+        os.replace(cfg + ".sleep-tmp", cfg)
+        print("  wrote %s (backup %s)" % (os.path.basename(cfg), os.path.basename(backup)))
+    elif changed and not RUN:
+        print("  (dry-run) not written")
+
+
 def hooks():
     """Wire the requested agents' capture hooks, driven by the tools/agents registry.
 
@@ -255,6 +359,14 @@ def hooks():
             wire_shell_hook(target)
         elif target["kind"] == "cursor-hooks":
             wire_cursor_hook(target)
+        elif target["kind"] == "opencode-plugin":
+            wire_opencode_hook(target)
+        elif target["kind"] == "windsurf-hooks":
+            wire_windsurf_hook(target)
+        elif target["kind"] == "cline-actions":
+            wire_cline_hook(target)
+        elif target["kind"] == "codex-notify":
+            wire_codex_hook(target)
         elif target["kind"] == "extension":
             print("  %s: extension, handled by `extension` step" % target["label"])
         else:
@@ -275,14 +387,18 @@ def _write_json_backed(path, doc):
     if not RUN:
         print("  (dry-run) not written")
         return
+    existed = os.path.isfile(path)
     backup = "%s.bak-%s-sleep" % (path, stamp())
-    shutil.copy2(path, backup)
+    if existed:
+        shutil.copy2(path, backup)
+    else:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
     tmp = path + ".sleep-tmp"
     with open(tmp, "w", encoding="utf-8") as h:
         json.dump(doc, h, indent=2, ensure_ascii=False)
         h.write("\n")
     os.replace(tmp, path)
-    print("  wrote %s (backup %s)" % (path, os.path.basename(backup)))
+    print("  wrote %s%s" % (path, " (backup %s)" % os.path.basename(backup) if existed else ""))
 
 # --- nightly scheduler per OS ---
 
@@ -338,6 +454,33 @@ def home_is_real() -> bool:
         return True
 
 
+CRON_BEGIN = "# BEGIN aydinnyunus-sleep-nightly"
+CRON_END = "# END aydinnyunus-sleep-nightly"
+CRON_LEGACY_MARKER = "# aydinnyunus-sleep-nightly"
+
+
+def _strip_sleep_cron(lines):
+    """Remove only complete owned blocks plus the legacy marker/command pair."""
+    out, i = [], 0
+    while i < len(lines):
+        line = lines[i]
+        if line == CRON_BEGIN:
+            try:
+                end = lines.index(CRON_END, i + 1)
+            except ValueError as exc:
+                raise ValueError("unterminated sleep cron block") from exc
+            i = end + 1
+            continue
+        if line == CRON_LEGACY_MARKER:
+            i += 1
+            if i < len(lines) and "sleep.py" in lines[i] and "nightly" in lines[i]:
+                i += 1
+            continue
+        out.append(line)
+        i += 1
+    return out
+
+
 def scheduler_linux(_nightly: bool):
     step("nightly pass (03:41, cron)")
     tmpl = open(os.path.join(ROOT, "schedulers", "nightly.cron"), encoding="utf-8").read()
@@ -348,19 +491,23 @@ def scheduler_linux(_nightly: bool):
     r = subprocess.run(["crontab", "-l"], capture_output=True, text=True)
     if r.returncode == 0:
         cur = r.stdout
-    marker = "# aydinnyunus-sleep-nightly"
-    lines = [ln for ln in cur.splitlines() if marker not in ln]
+    try:
+        lines = _strip_sleep_cron(cur.splitlines())
+    except ValueError as exc:
+        print("  refused cron update: %s" % exc)
+        return 1
     if not RUN:
-        print("  would: append cron line: %s" % cmd)
-        return
-    lines.append(marker)
-    lines.append(cmd)
+        print("  would: replace owned cron block with: %s" % cmd)
+        return 0
+    lines.extend((CRON_BEGIN, cmd, CRON_END))
     new_cron = "\n".join(lines) + "\n"
     in_run = subprocess.run(["crontab", "-"], input=new_cron, text=True, capture_output=True)
     if in_run.returncode != 0:
         print("  crontab write failed: %s" % (in_run.stderr or r.stderr).strip())
     else:
         print("  installed cron line (03:41 daily)")
+        return 0
+    return 1
 
 
 def scheduler_windows(_nightly: bool):
@@ -381,31 +528,39 @@ def scheduler_windows(_nightly: bool):
     else:
         print("  scheduled %s (03:41 daily)" % tn)
 
-def extension_link(ext: bool):
-    if not ext:
+def extension_link(selected_agents):
+    """Link the TypeScript capture extension into each selected extension-kind agent's
+    auto-discovered extensions dir (pi -> ~/.omo/agent/extensions, oh-my-pi -> ~/.omp/agent).
+    A hooks.json entry can never fire on these engines; only the extension link matters."""
+    targets = [t for t in agents.EXTENSION_TARGETS if t["key"] in selected_agents]
+    if not targets:
         return
-    step("Pi extension (opt-in)")
-    dest = os.path.join(OMO_HOME, "extensions", "sleep")
-    if os.path.islink(dest):
-        os.remove(dest)
-    elif os.path.isdir(dest):
-        os.rename(dest, dest + ".bak-" + stamp() + "-sleep")
-    if not RUN:
-        print("  would: ln -sfn %s  %s" % (os.path.join(ROOT, "extension"), dest))
-        return
-    os.makedirs(os.path.join(OMO_HOME, "extensions"), exist_ok=True)
-    if os.path.islink(dest):
-        os.remove(dest)
-    try:
-        os.symlink(os.path.join(ROOT, "extension"), dest, target_is_directory=True)
-    except (OSError, NotImplementedError):
-        shutil.copytree(os.path.join(ROOT, "extension"), dest)
-    if not os.path.isfile(os.path.join(dest, "index.ts")):
-        print("  linked but index.ts does not resolve - aborting")
-        raise SystemExit(1)
-    print("  Placed in the auto-discovered dir; it loads on the next session.")
+    step("extension link")
+    for target in targets:
+        dest = os.path.join(target["extension_dir"](os.environ), "sleep")
+        source = os.path.join(ROOT, "extension")
+        label = "%s extension" % target["key"]
+        if os.path.islink(dest) and os.path.realpath(dest) == os.path.realpath(source):
+            print("  %s already linked, unchanged" % label)
+            continue
+        if not RUN:
+            print("  would: replace %s with link to %s" % (dest, source))
+            continue
+        if os.path.islink(dest):
+            os.remove(dest)
+        elif os.path.isdir(dest):
+            os.rename(dest, dest + ".bak-" + stamp() + "-sleep")
+        os.makedirs(os.path.dirname(dest), exist_ok=True)
+        try:
+            os.symlink(source, dest, target_is_directory=True)
+        except (OSError, NotImplementedError):
+            shutil.copytree(source, dest)
+        if not os.path.isfile(os.path.join(dest, "index.ts")):
+            print("  linked but index.ts does not resolve - aborting")
+            raise SystemExit(1)
+        home_dir = target["extension_dir"](os.environ)
+        print("  Placed %s in %s (loads on the next session)" % (label, home_dir))
     print("  Provenance: cd %s && omo -p 'hi' >/dev/null 2>&1; tail -4 %s/logs/extension.log" % (ROOT, SLEEP_HOME))
-    print("  Expect session_start / publish / agent_settled lines there.")
     print("  Kill switch: SLEEP_DISABLE=1. Uninstall: %s/uninstall.sh" % ROOT)
 
 
@@ -452,8 +607,7 @@ def main(argv=None) -> int:
     # --agents off is asked (multi-select). Non-interactive shells (CI, scripts)
     # default to claude only, preserving the historical contract.
     _resolve_agents(a.agents, RUN and interactive())
-    if "pi" in _selected_agents():
-        ext = True
+    ext = ext or "pi" in _selected_agents()
     hooks()
 
     # A user who ran plain `install.py` should not need to know the flags: ask
@@ -471,17 +625,22 @@ def main(argv=None) -> int:
             ext = confirm(
                 "Also install the Pi/OmO extension so sessions are captured automatically? ",
                 False)
+    # --extension (or the interactive yes) preserves the historic Pi opt-in.
+    # Oh My Pi remains an independent --agents oh-my-pi selection.
+    if ext and "pi" not in _selected_agents():
+        _SELECTED.append("pi")
 
     if nightly:
         if IS_MAC:
             scheduler_mac(nightly)
         elif IS_LINUX:
-            scheduler_linux(nightly)
+            if scheduler_linux(nightly) != 0:
+                return 1
         elif IS_WIN:
             scheduler_windows(nightly)
         else:
             print("\n== nightly\n  unsupported platform %r for scheduler; skipping" % sys.platform)
-    extension_link(ext)
+    extension_link(_selected_agents())
     done()
     return 0
 
