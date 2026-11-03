@@ -1315,6 +1315,41 @@ class Doctor(Sandbox):
         self.assertEqual(got.returncode, 0, got.stdout + got.stderr)
         self.assertNotIn("contradicting-candidates", got.stdout)
 
+    def test_doctor_names_a_record_no_session_was_ever_served(self):
+        """A provisional that nothing has ever asked for is different from one that was
+        served and ignored: only the record itself can say which. Both are silent today,
+        so an unused record keeps costing context in every session that shares its
+        project. Report it, change nothing."""
+        # age it past the window rather than waiting 8 weeks
+        self.seed_candidate("cunused", "The datadog dashboard for the api lives under payments.",
+                            cwd=self.proj_a, ts="2020-01-01T00:00:00+0300")
+        got = self.cli("doctor")
+        self.assertEqual(got.returncode, 0, got.stderr)
+        self.assertIn("unused-candidate-never-served (1)", got.stdout)
+        issues = json.loads(self.cli("doctor", "--json").stdout)
+        hit = [i for i in issues if i["issue"] == "unused-candidate-never-served"]
+        self.assertEqual(len(hit), 1, issues)
+        self.assertEqual(hit[0]["id"], "cunused")
+        self.assertEqual(hit[0]["injected"], 0)
+        self.assertGreater(hit[0]["age_days"], 300)
+
+    def test_inject_marks_what_it_served_so_the_report_can_go_quiet(self):
+        """The counter is the evidence the report reads, so writing it must happen on
+        the records that actually printed - and only those."""
+        self.seed_candidate("ca", "The internal GitLab needs a PAT with read_api scope.",
+                            cwd=self.proj_a)
+        self.seed_candidate("cb", "Wrote a scratch note while writing the onboarding doc.",
+                            cwd=self.proj_a)
+        f = os.path.join(self.sleep_home, "candidates", "ca.md")
+        self.assertNotIn("injected:", self.read(f))
+        got = self.cli("inject", "--project", self.proj_a, "--max", "1")
+        self.assertEqual(got.returncode, 0, got.stderr)
+        stamped = self.read(f)
+        self.assertIn("injected: 1", stamped, "the record that printed must be stamped")
+        self.assertIn("injected_at:", stamped)
+        other = self.read(os.path.join(self.sleep_home, "candidates", "cb.md"))
+        self.assertNotIn("injected:", other, "a record cut by --max was never served")
+
     def test_doctor_does_not_flag_a_malformed_buffer_line(self):
         """The report is about memory hygiene, not buffer parsing: pinned so nobody
         assumes a corrupted buffer will surface here. `status` is what tolerates it."""

@@ -26,6 +26,12 @@ KINDS = ("fact", "preference", "procedure", "warning")
 # Doctor flags a provisional candidate as stale when its last activity (creation
 # or the most recent rediscovery) is older than this.
 STALE_CANDIDATE_WEEKS = 4.0
+# A provisional record nobody has asked for and nobody has re-learned is dead weight:
+# it sits in the injected context of every session that shares its project. Named
+# separately from STALE_CANDIDATE_WEEKS because "nobody re-learned it" and "nobody ever
+# looked at it" are different facts and only the second one means the queue is filling
+# with things that were never useful. Report only, like every other doctor line.
+UNUSED_CANDIDATE_WEEKS = 8.0
 
 
 def _hours_since(ts: str) -> float | None:
@@ -281,6 +287,38 @@ def _record_rediscovery(cid: str, session: str) -> str | None:
         fh.write(emit(meta, body))
     return "duplicate of %s (rediscovered in a later session: %d distinct sessions now; use `sleepctl show %s` to review)" % (
         cid, n, cid)
+
+
+def record_injection(ids: list[str]) -> int:
+    """Stamp `injected`/`injected_at` on the records a session's context just carried.
+
+    A record that no session has ever been served is a different thing from one that
+    was served and ignored, and only the record itself can tell them apart. Writing the
+    counter here (not in the reporter) keeps the evidence next to the fact it is about:
+    the injected line a session saw is the same event the doctor later reads.
+    Ids that no longer resolve are skipped; a failed stamp never breaks an injection
+    that already printed, so the caller may ignore the return value.
+    """
+    n = 0
+    for cid in ids:
+        got = get_candidate(cid)
+        if not got:
+            continue
+        meta, body = got
+        meta["injected"] = str(int(meta.get("injected", 0) or 0) + 1)
+        meta["injected_at"] = paths.now()
+        loc = paths.candidates_dir()
+        if not os.path.isfile(os.path.join(loc, cid + ".md")):
+            p = os.path.join(paths.archive_dir("candidates"), cid + ".md")
+            if os.path.isfile(p):
+                loc = paths.archive_dir("candidates")
+        try:
+            with open(os.path.join(loc, cid + ".md"), "w", encoding="utf-8") as fh:
+                fh.write(emit(meta, body))
+        except OSError:
+            continue
+        n += 1
+    return n
 
 
 def add_candidate(text: str, kind: str = "fact", source: str = "agent",
@@ -895,6 +933,24 @@ def doctor(memory_dir: str | None = None, targets: list[str] | None = None,
         if age_h is not None and age_h >= cutoff_hours:
             out.append({"issue": "stale-candidate-unrediscovered", "id": c["id"],
                         "last_seen": str(last)[:10], "rediscovered": int(c.get("rediscovered", 0) or 0)})
+    # The sibling of the check above, measuring a different emptiness. That one says
+    # "nobody re-learned this"; this one says "nobody ever asked for this": no inject
+    # ever carried it and no consolidation ever saw it come up again. A record can be
+    # perfectly true and still be worth naming here, because the cost it carries is
+    # paid by every session that shares the project and the evidence it is worth
+    # paying is published in the record itself.
+    unused_cutoff = UNUSED_CANDIDATE_WEEKS * 7 * 24
+    for c in list_candidates():
+        if c.get("status") != "provisional":
+            continue
+        served = int(c.get("injected", 0) or 0) + int(c.get("rediscovered", 0) or 0)
+        if served:
+            continue
+        age_h = _hours_since(str(c.get("ts", ""))) if c.get("ts") else None
+        if age_h is not None and age_h >= unused_cutoff:
+            out.append({"issue": "unused-candidate-never-served", "id": c["id"],
+                        "age_days": int(age_h // 24),
+                        "injected": 0, "rediscovered": 0})
     for cid, body in pool:
         for path, text in bodies.items():
             # MEMORY.md is the index: it restates every entry by design, so scoring
