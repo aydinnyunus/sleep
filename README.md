@@ -321,6 +321,15 @@ Run the two dream components separately when you want more control:
 | `./sleep.py nightly --dry-run` | Preview the unattended nightly workflow |
 | `./sleep.py doctor` | Find duplicate or overlapping memory records, flag contradicting candidates (same subject, one side carries a correction marker) and print the `supersede <older> <newer>` command to run, flag provisional candidates not rediscovered for 4+ weeks, and report records parked in quarantine awaiting a human (report only: it never supersedes, drops, merges or un-parks anything itself) |
 | `./sleep.py doctor --stale <value>` | Show which approved records still hold a stale value (e.g. a changed URL) |
+| `./sleep.py doctor --contradictions` | Ask a model to adjudicate shortlisted pairs of provisional records for conflicts (`--budget`, default $0.25); report-only, and each finding carries the `supersede <older> <newer>` command to run |
+
+The headless model call picks its transport by what exists on the machine, in this order:
+the host agent's own `omo -p` (used when an `omo` binary is on PATH), then `claude
+--bare --print`, then a direct HTTPS call to the endpoint in `~/.sleep/env` (needs both
+`ANTHROPIC_BASE_URL` and `ANTHROPIC_AUTH_TOKEN`). Force one with
+`SLEEP_LLM_TRANSPORT=omo|claude|http`. A transport that is not usable on this machine
+raises instead of silently falling back, and omo is never handed the gateway's model
+name: it routes through its own config, so only `SLEEP_MODEL` reaches it.
 | `./sleep.py supersede <old> <new>` | Mark `<old>` invalid as of now and `<new>` valid as of now (`valid_until` / `valid_from`), so the window a memory was true is readable from the files |
 | `./sleep.py inject --project "$PWD"` | Print provisional context for the current project, newest first, each line dated |
 | `./sleep.py inject --project "$PWD" --query "..."` | Same, but rank records by overlap with the live request so the most relevant survive `--max` |
