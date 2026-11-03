@@ -322,6 +322,7 @@ Run the two dream components separately when you want more control:
 | `./sleep.py doctor` | Find duplicate or overlapping memory records, flag contradicting candidates (same subject, one side carries a correction marker) and print the `supersede <older> <newer>` command to run, flag provisional candidates not rediscovered for 4+ weeks, flag supersede pointers that name a record no longer in the store, and report records parked in quarantine awaiting a human (report only: it never supersedes, drops, merges or un-parks anything itself) |
 | `./sleep.py doctor --stale <value>` | Show which approved records still hold a stale value (e.g. a changed URL) |
 | `./sleep.py doctor --contradictions` | Ask a model to adjudicate shortlisted pairs of provisional records for conflicts (`--budget`, default $0.25); report-only, and each finding carries the `supersede <older> <newer>` command to run |
+| `./sleep.py doctor --contradictions --tier t2` | Adjudicate pairs of **approved** permanent memory instead of candidates (`--tier both` does both); a T2 finding is labelled `contradicting-memory` and carries the `demote <older>` command, because approved memory is un-approved, never superseded |
 
 The headless model call picks its transport by what exists on the machine, in this order:
 the host agent's own `omo -p` (used when an `omo` binary is on PATH), then `claude
