@@ -29,7 +29,7 @@ Sleep adds a reviewable memory cycle to nine selectable coding-agent targets. It
 - **Budgeted consolidation.** Sleep runs only after the record and time gates pass.
 - **Review before permanence.** New memories stay provisional until you promote or refuse them.
 - **Nightly dream cycle.** Mine repeated preferences, consolidate recent observations, and measure memory effects while you are away.
-- **Measured replay.** Run the same task with memory off and on before deciding whether a memory helps.
+- **Measured replay.** Run the same task with memory off and on before deciding whether a memory helps. Each completed pass leaves a one-line quality summary (`helps / hurts / ties`) in `status` and in the nightly report, so the question stays answerable between passes; a pass whose two arms ran the same prompt says it measured nothing instead of reporting zeros.
 - **Repeated preference detection.** `mine` finds instructions you gave in multiple sessions without a model call.
 - **Project isolation.** A project's provisional memory is injected only into that project.
 - **Reviewable permanence.** Each approved memory in your index carries its review date and source, so you can tell when a saved instruction was pinned.
@@ -317,6 +317,7 @@ Run the two dream components separately when you want more control:
 | `./sleep.py demote <id> --note "..."` | Un-approve a promoted memory: mark the approved record as retracted (kept on record, not deleted) and reopen the candidate as refused. Also accepts a permanent record's filename slug or the `id:` it carries, so a memory whose candidate record is gone is still reversible |
 | `./sleep.py refuse <id> --note "..."` | Record that a candidate is incorrect |
 | `./sleep.py replay --run --limit 3` | Compare selected tasks with memory off and on |
+| `./sleep.py status -v` | ... and the last measured memory quality (`3 helps / 1 hurts / 4 ties from 8 samples`, or "no replay measurement has run yet") |
 | `./sleep.py mine --dry-run` | Find preferences repeated across sessions |
 | `./sleep.py nightly --dry-run` | Preview the unattended nightly workflow |
 | `./sleep.py doctor` | Find duplicate or overlapping memory records, flag contradicting candidates (same subject, one side carries a correction marker) and print the `supersede <older> <newer>` command to run, flag provisional candidates not rediscovered for 4+ weeks, flag supersede pointers that name a record no longer in the store, and report records parked in quarantine awaiting a human (report only: it never supersedes, drops, merges or un-parks anything itself) |
@@ -404,7 +405,7 @@ candidates/     provisional T1 records
 reports/        replay reports
 logs/           hook and nightly logs
 .quarantine/    rejected unsafe input
-state.json      sleep and replay timestamps
+state.json      sleep and replay timestamps, and the last measured memory-quality summary
 env             optional scheduled-run environment
 ```
 
