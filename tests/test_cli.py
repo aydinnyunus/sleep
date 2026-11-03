@@ -1175,6 +1175,101 @@ class Doctor(Sandbox):
             self.assertIn("status: provisional", text,
                           "%s must keep its status; the report never supersedes" % cid)
 
+    def seed_memory(self, name, body, ident=None, promoted_at="2026-01-01T00:00:00+0300",
+                    status="promoted"):
+        """Write one T2 file by hand, the way promote() would have written it."""
+        meta = [("id", ident or name), ("ts", promoted_at), ("source", "user"),
+                ("trust", "verified"), ("kind", "fact"), ("status", status),
+                ("session", "seed"), ("cwd", self.proj_a), ("tags", ""), ("evidence", ""),
+                ("supersedes", ""), ("superseded_by", ""), ("redacted", "false"),
+                ("promoted_at", promoted_at), ("notes", "")]
+        text = ["---"] + ["%s: %s" % (k, v) for k, v in meta] + ["---", body, ""]
+        return self.write(os.path.join(self.memory, name + ".md"), "\n".join(text))
+
+    def test_doctor_contradictions_tier_t2_adjudicates_approved_memory(self):
+        """Approved memory is never compared with itself today: the adjudicator only saw
+        T1 candidates, so two permanent records that now disagree stayed invisible. The
+        t2 tier reads the memory files, and because a permanent record is not a
+        candidate, its body only reaches the model through the parsed-records path."""
+        self.write(os.path.join(self.memory, "MEMORY.md"), "# Index\n")
+        self.seed_memory("staging-host", "The staging deploy host is mars-staging.internal.",
+                         ident="m_old", promoted_at="2026-09-01T10:00:00+0300")
+        self.seed_memory("staging-host-v2",
+                         "The staging deploy host is now venus-staging.internal; "
+                         "mars-staging.internal is no longer used.",
+                         ident="m_new", promoted_at="2026-10-20T10:00:00+0300")
+        fake = os.path.join(self.bin, "fake-claude-t2")
+        self.write(fake, FAKE_CLAUDE_T2_CONTRADICTIONS)
+        os.chmod(fake, 0o755)
+        got = self.cli("doctor", "--contradictions", "--tier", "t2", "--budget", "0.30",
+                       CLAUDE_BIN=fake)
+        self.assertEqual(got.returncode, 0, got.stdout + got.stderr)
+        self.assertIn("contradicting-memory (1)", got.stdout,
+                      "a T2 conflict is reported under its own issue name")
+        issues = json.loads(self.cli("doctor", "--contradictions", "--tier", "t2", "--json",
+                                     "--budget", "0.30", CLAUDE_BIN=fake).stdout)
+        hit = [i for i in issues if i["issue"] == "contradicting-memory"]
+        self.assertEqual(len(hit), 1, issues)
+        self.assertEqual((hit[0]["older"], hit[0]["newer"]), ("m_old", "m_new"))
+        self.assertEqual(hit[0]["suggest"], "sleep.py demote m_old",
+                         "approved memory has no supersede verb; a human un-approves it")
+        # report-only: both memory files keep their status
+        for name in ("staging-host", "staging-host-v2"):
+            text = self.read(os.path.join(self.memory, name + ".md"))
+            self.assertIn("status: promoted", text,
+                          "%s must keep its status; the report never demotes" % name)
+
+    def test_doctor_contradictions_default_tier_ignores_permanent_memory(self):
+        """The default stays the old behaviour: nightly runs it for free over candidates
+        and must not start reporting on approved memory unasked."""
+        self.write(os.path.join(self.memory, "MEMORY.md"), "# Index\n")
+        self.seed_memory("staging-host", "The staging deploy host is mars-staging.internal.",
+                         ident="m_old")
+        self.seed_memory("staging-host-v2", "The staging deploy host is venus-staging.internal.",
+                         ident="m_new", promoted_at="2026-10-20T10:00:00+0300")
+        fake = os.path.join(self.bin, "fake-claude-t2")
+        self.write(fake, FAKE_CLAUDE_T2_CONTRADICTIONS)
+        os.chmod(fake, 0o755)
+        got = self.cli("doctor", "--contradictions", "--budget", "0.30", CLAUDE_BIN=fake)
+        self.assertEqual(got.returncode, 0, got.stdout + got.stderr)
+        self.assertNotIn("contradicting-memory", got.stdout)
+        self.assertNotIn("contradicting-candidates", got.stdout)
+
+    def test_doctor_contradictions_tier_t2_skips_retracted_memory(self):
+        """A record a person already un-approved is a decision, not an inconsistency."""
+        self.write(os.path.join(self.memory, "MEMORY.md"), "# Index\n")
+        self.seed_memory("staging-host", "The staging deploy host is mars-staging.internal.",
+                         ident="m_old", status="retracted")
+        self.seed_memory("staging-host-v2", "The staging deploy host is venus-staging.internal.",
+                         ident="m_new", promoted_at="2026-10-20T10:00:00+0300")
+        fake = os.path.join(self.bin, "fake-claude-t2")
+        self.write(fake, FAKE_CLAUDE_T2_CONTRADICTIONS)
+        os.chmod(fake, 0o755)
+        got = self.cli("doctor", "--contradictions", "--tier", "t2", "--budget", "0.30",
+                       CLAUDE_BIN=fake)
+        self.assertEqual(got.returncode, 0, got.stdout + got.stderr)
+        self.assertNotIn("contradicting-memory", got.stdout,
+                         "a retracted record must not be re-reported as a conflict")
+
+    def test_doctor_contradictions_tier_both_covers_candidates_and_memory(self):
+        self.write(os.path.join(self.memory, "MEMORY.md"), "# Index\n")
+        self.seed_candidate("cA", "The staging host is mars-staging.internal.", cwd=self.proj_a,
+                            ts="2026-10-01T10:00:00+0300")
+        self.seed_candidate("cB", "The staging host is now venus-staging.internal.", cwd=self.proj_a,
+                            ts="2026-10-20T10:00:00+0300")
+        self.seed_memory("staging-host", "The staging deploy host is mars-staging.internal.",
+                         ident="m_old")
+        self.seed_memory("staging-host-v2", "The staging deploy host is venus-staging.internal.",
+                         ident="m_new", promoted_at="2026-10-20T10:00:00+0300")
+        fake = os.path.join(self.bin, "fake-claude-both")
+        self.write(fake, FAKE_CLAUDE_BOTH_TIERS)
+        os.chmod(fake, 0o755)
+        issues = json.loads(self.cli("doctor", "--contradictions", "--tier", "both", "--json",
+                                     "--budget", "0.30", CLAUDE_BIN=fake).stdout)
+        kinds = {i["issue"] for i in issues}
+        self.assertIn("contradicting-candidates", kinds, issues)
+        self.assertIn("contradicting-memory", kinds, issues)
+
     def test_doctor_contradictions_survives_a_model_that_returns_nothing(self):
         """A dead or silent model must not take down the rest of the scan."""
         self.seed_candidate("cA", "The staging host is mars-staging.internal.", cwd=self.proj_a,
@@ -1934,6 +2029,46 @@ result = {"pairs": [{"pair": 1, "contradiction": True, "older": "cA", "newer": "
                      "reason": "the host changed"}]}
 print(json.dumps([{"type": "system", "subtype": "init"},
                   {"type": "result", "subtype": "success", "result": json.dumps(result)}]))
+"""
+
+
+FAKE_CLAUDE_T2_CONTRADICTIONS = """#!/usr/bin/env python3
+# Stand-in for a doctor --contradictions --tier t2 run: the fake really reads the pair
+# bodies it was given, so a body that never reached the prompt is adjudicated as an
+# absence rather than silently "confirmed" by a canned verdict.
+import json
+import sys
+
+prompt = sys.stdin.read()
+# the pair is contradicted only if BOTH bodies are present in the prompt
+has_bodies = "mars-staging.internal" in prompt and "venus-staging.internal" in prompt
+pair = {"pair": 1, "contradiction": bool(has_bodies), "older": "m_old", "newer": "m_new",
+        "reason": "the host changed" if has_bodies else "no record bodies supplied"}
+print(json.dumps([{"type": "system", "subtype": "init"},
+                  {"type": "result", "subtype": "success",
+                   "result": json.dumps({"pairs": [pair]})}]))
+"""
+
+
+FAKE_CLAUDE_BOTH_TIERS = """#!/usr/bin/env python3
+# Adjudicates EVERY pair the prompt carried, not just the first: with `--tier both` the
+# shortlist holds pairs from two tiers and a one-pair fake would report only the
+# top-scoring one, hiding the other tier rather than testing it.
+import json
+import re
+import sys
+
+prompt = sys.stdin.read()
+pairs = []
+for block in prompt.split("Pair ")[1:]:
+    n = int(re.match(r"(\d+)", block).group(1))
+    ids = re.findall(r"id=(\S+)", block)
+    pairs.append({"pair": n, "contradiction": True,
+                  "older": ids[0] if ids else "?", "newer": ids[1] if len(ids) > 1 else "?",
+                  "reason": "the host changed"})
+print(json.dumps([{"type": "system", "subtype": "init"},
+                  {"type": "result", "subtype": "success",
+                   "result": json.dumps({"pairs": pairs})}]))
 """
 
 

@@ -650,6 +650,35 @@ def _first_ref(value) -> str:
     return str(value or "").split("|")[0].strip()
 
 
+def permanent_records(memory_dir: str | None = None) -> list:
+    """(id, body, ts) for every ACTIVE permanent (T2) record, the T2 analogue of the
+    provisional shortlist input.
+
+    Retracted files are excluded: a memory a person already un-approved is a decision,
+    not an inconsistency to re-report. `id` prefers the frontmatter id and falls back to
+    the filename slug, so a hand-written file (no id in frontmatter) is still nameable
+    in a finding and actionable with `demote <slug>`.
+    """
+    mdir = memory_dir or paths.memory_dir()
+    out = []
+    if not os.path.isdir(mdir):
+        return out
+    for name in sorted(os.listdir(mdir)):
+        if not name.endswith(".md") or name == "MEMORY.md":
+            continue
+        path = os.path.join(mdir, name)
+        try:
+            with open(path, encoding="utf-8") as fh:
+                meta, body = parse(fh.read())
+        except (OSError, ValueError):
+            continue
+        if meta.get("status") == "retracted":
+            continue
+        ref = str(meta.get("id") or name[:-3]).strip()
+        out.append((ref, body or "", str(meta.get("ts") or meta.get("promoted_at") or "")))
+    return out
+
+
 def _archived_candidates() -> list:
     """Parsed frontmatter of archived candidates (promoted/superseded records live there)."""
     out = []

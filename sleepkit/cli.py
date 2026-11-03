@@ -207,7 +207,14 @@ def _doctor_shortlist() -> list:
     return out
 
 
-def _llm_contradictions(pairs: list, budget: float, model: str | None) -> list:
+def _tier_of(cid: str, memory_ids: set) -> str:
+    """Which tier a record belongs to, so a pair's own membership decides its wording."""
+    return "t2" if cid in memory_ids else "t1"
+
+
+def _llm_contradictions(pairs: list, budget: float, model: str | None,
+                        tier: str = "t1", records: dict | None = None,
+                        memory_ids: set | None = None) -> list:
     """Ask the model to adjudicate shortlisted pairs. Report-only: returns findings,
     changes nothing. A failed or unparseable call yields [] so doctor still reports the
     rest of its scan instead of dying on a model problem."""
@@ -217,8 +224,15 @@ def _llm_contradictions(pairs: list, budget: float, model: str | None) -> list:
     # under meta["_body"] (that key only exists on the list_candidates path). Reading the
     # wrong one sent the model three pairs of empty bodies, and it answered, correctly,
     # that there was nothing to compare - a silently useless call, not a crash.
-    seen = {}
+    # `records` carries (meta, body) for the ids the caller already parsed. A permanent
+    # T2 record is not in the candidate store, so `store.get_candidate` returns nothing
+    # for it and this function used to hand the model three pairs of EMPTY bodies - the
+    # model then answered, correctly, that no claim was present, and the whole T2 pass
+    # reported a clean store without reading a single memory.
+    seen = dict(records or {})
     for cid in {c for pair in pairs for c in pair}:
+        if cid in seen:
+            continue
         got = store.get_candidate(cid)
         seen[cid] = (got[0], got[1]) if got else ({}, "")
     lines = []
@@ -228,8 +242,16 @@ def _llm_contradictions(pairs: list, budget: float, model: str | None) -> list:
             meta, body = seen.get(cid, ({}, ""))
             lines.append("  id=%s ts=%s body=%s" % (cid, meta.get("ts", "?"),
                                                    (body or "").replace("\n", " ").strip()))
-    user = ("Unreviewed provisional memory records, grouped into candidate pairs.\n"
-            "Adjudicate each pair per your instructions.\n\n" + "\n".join(lines))
+    if tier in ("t2", "both"):
+        user = ("Memory records, grouped into candidate pairs. Some are unreviewed "
+                "provisional candidates; some are permanent memories a human already "
+                "approved.\nAdjudicate each pair per your instructions: two approved "
+                "memories that now assert opposite things mean the older one needs a "
+                "human verdict, not that the memory store is broken.\n\n"
+                + "\n".join(lines))
+    else:
+        user = ("Unreviewed provisional memory records, grouped into candidate pairs.\n"
+                "Adjudicate each pair per your instructions.\n\n" + "\n".join(lines))
     pf = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "prompts",
                       "contradiction-check.md")
     # The subprocess seam: tests replace llm.run with a fake so the adjudication path is
@@ -264,6 +286,7 @@ def _llm_contradictions(pairs: list, budget: float, model: str | None) -> list:
     if not isinstance(doc, dict):
         return []
     found = []
+    mem = memory_ids or set()
     for item in doc.get("pairs") or []:
         if not isinstance(item, dict) or not item.get("contradiction"):
             continue
@@ -271,18 +294,63 @@ def _llm_contradictions(pairs: list, budget: float, model: str | None) -> list:
             older, newer = pairs[int(item["pair"]) - 1]
         except (KeyError, IndexError, ValueError, TypeError):
             continue
-        found.append({"issue": "contradicting-candidates",
-                      "pair": [older, newer], "older": older, "newer": newer,
-                      "source": "model", "reason": str(item.get("reason", ""))[:200],
-                      "suggest": "sleep.py supersede %s %s" % (older, newer)})
+        # The label follows the pair, not the --tier flag: in `both` mode a T1 finding
+        # must not be reported as memory, nor a memory finding as a candidate.
+        tier_of_pair = "t2" if (older in mem and newer in mem) else "t1"
+        # T2 has no supersede verb: the only honest action on approved memory is a
+        # human demote (un-approve) of the record that lost, so the suggestion differs.
+        if tier_of_pair == "t2":
+            found.append({"issue": "contradicting-memory",
+                          "pair": [older, newer], "older": older, "newer": newer,
+                          "source": "model", "reason": str(item.get("reason", ""))[:200],
+                          "suggest": "sleep.py demote %s" % older})
+        else:
+            found.append({"issue": "contradicting-candidates",
+                          "pair": [older, newer], "older": older, "newer": newer,
+                          "source": "model", "reason": str(item.get("reason", ""))[:200],
+                          "suggest": "sleep.py supersede %s %s" % (older, newer)})
     return found
+
+
+def _doctor_memory_shortlist(memory_dir: str | None = None) -> list:
+    """(id, body, ts) for every active permanent T2 record, the input to candidate_pairs."""
+    return store.permanent_records(memory_dir)
+
+
+def _memory_records(memory_dir: str | None = None) -> dict:
+    """id -> (meta, body) for active permanent records, the lookup the adjudicator needs."""
+    out = {}
+    for cid, body, ts in store.permanent_records(memory_dir):
+        out[cid] = ({"id": cid, "ts": ts}, body)
+    return out
 
 
 def cmd_doctor(a) -> int:
     issues = store.doctor(needle=a.stale)
     if getattr(a, "contradictions", False):
-        pairs = store.candidate_pairs(_doctor_shortlist())
-        issues += _llm_contradictions(pairs, getattr(a, "budget", 0.25), getattr(a, "model", None))
+        tier = getattr(a, "tier", "t1") or "t1"
+        mdir = getattr(a, "cwd", None) or None
+        records: dict = {}
+        memory_ids: set = set()
+        if tier == "t2":
+            recs = _doctor_memory_shortlist(mdir)
+            records = _memory_records(mdir)
+            memory_ids = set(records)
+        elif tier == "both":
+            mem_recs = _doctor_memory_shortlist(mdir)
+            records = _memory_records(mdir)
+            memory_ids = set(records)
+            recs = _doctor_shortlist() + mem_recs
+        else:
+            recs = _doctor_shortlist()
+        # Keep only same-tier pairs: a T1-vs-T2 pair has no single honest action (there is
+        # no verb that both supersedes a candidate and un-approves a memory), so asking the
+        # model about it would produce a suggestion no command can carry out.
+        pairpairs = [p for p in store.candidate_pairs(recs)
+                     if (_tier_of(p[0], memory_ids) == _tier_of(p[1], memory_ids))]
+        issues += _llm_contradictions(pairpairs, getattr(a, "budget", 0.25),
+                                      getattr(a, "model", None), tier=tier,
+                                      records=records, memory_ids=memory_ids)
     if a.json:
         _p(json.dumps(issues, indent=2, sort_keys=True, default=str))
     elif not issues:
@@ -540,6 +608,10 @@ def main(argv=None) -> int:
                          "conflicts (costs budget; report-only, supersedes nothing)")
     dc.add_argument("--budget", type=float, default=0.25,
                     help="max USD for --contradictions (default 0.25)")
+    dc.add_argument("--tier", choices=["t1", "t2", "both"], default="t1",
+                    help="which tier --contradictions adjudicates: unreviewed "
+                         "candidates (t1, default), approved permanent memory (t2), "
+                         "or both")
     dc.set_defaults(fn=cmd_doctor)
 
     rp = sub.add_parser("replay", help="layer 3: A/B measure provisional memory, report-only")
