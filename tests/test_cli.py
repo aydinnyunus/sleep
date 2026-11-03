@@ -174,7 +174,8 @@ class Sandbox(unittest.TestCase):
 
     # --------------------------------------------------------------- fixtures --
     def seed_candidate(self, cid, body, source="user", trust="verified", kind="fact",
-                       status="provisional", cwd=None, session="seed"):
+                       status="provisional", cwd=None, session="seed",
+                       ts="2026-01-01T00:00:00+0300"):
         """Write one T1 file by hand.
 
         Candidates are normally produced by `distill`, and distill is a model call,
@@ -183,7 +184,7 @@ class Sandbox(unittest.TestCase):
         the fixture pins the on-disk contract instead of quietly following the
         product if it ever changes the format.
         """
-        meta = [("id", cid), ("ts", "2026-01-01T00:00:00+0300"), ("source", source),
+        meta = [("id", cid), ("ts", ts), ("source", source),
                 ("trust", trust), ("kind", kind), ("status", status),
                 ("session", session), ("cwd", cwd or self.proj_a), ("tags", ""),
                 ("evidence", ""), ("supersedes", ""), ("superseded_by", ""),
@@ -896,9 +897,9 @@ class Doctor(Sandbox):
 
     def test_doctor_flags_the_corrected_pair_as_contradicting(self):
         self.seed_candidate("cold", "The deploy host is mars.internal and we push from prod.",
-                            cwd=self.proj_a)
+                            cwd=self.proj_a, ts="2026-01-01T00:00:00+0300")
         self.seed_candidate("cnew", "The deploy host is no longer mars.internal; we push from staging now.",
-                            cwd=self.proj_a)
+                            cwd=self.proj_a, ts="2026-01-05T00:00:00+0300")
         got = self.cli("doctor")
         self.assertEqual(got.returncode, 0, got.stderr)
         self.assertIn("contradicting-candidates (1)", got.stdout)
@@ -906,6 +907,27 @@ class Doctor(Sandbox):
         hit = [i for i in issues if i["issue"] == "contradicting-candidates"]
         self.assertEqual(len(hit), 1, issues)
         self.assertEqual(sorted(hit[0]["pair"]), ["cnew", "cold"])
+
+    def test_the_contradiction_report_names_the_side_to_supersede_without_doing_it(self):
+        """The pair is only useful if the person can act on it in one step. The report must
+        name which record is older (the claim) and which is newer (the correction), and
+        print the exact command - but running doctor must never supersede anything itself:
+        a keyword match is not proof, so the decision stays human."""
+        self.seed_candidate("cclaim", "The deploy host is mars.internal and we push from prod.",
+                            cwd=self.proj_a, ts="2026-01-01T00:00:00+0300")
+        self.seed_candidate("cfix", "The deploy host is no longer mars.internal; we push from staging now.",
+                            cwd=self.proj_a, ts="2026-02-01T00:00:00+0300")
+        issues = json.loads(self.cli("doctor", "--json").stdout)
+        hit = [i for i in issues if i["issue"] == "contradicting-candidates"]
+        self.assertEqual(len(hit), 1, issues)
+        self.assertEqual(hit[0]["older"], "cclaim")
+        self.assertEqual(hit[0]["newer"], "cfix")
+        self.assertIn("supersede cclaim cfix", hit[0]["suggest"])
+        # report-only: neither record changed status by being reported
+        for cid in ("cclaim", "cfix"):
+            body = self.read(os.path.join(self.sleep_home, "candidates", cid + ".md"))
+            self.assertIn("status: provisional", body)
+            self.assertNotIn("valid_until:", body.split("---")[1])
 
     def test_doctor_does_not_flag_a_malformed_buffer_line(self):
         """The report is about memory hygiene, not buffer parsing: pinned so nobody

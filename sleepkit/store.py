@@ -600,6 +600,15 @@ def prune_buffer(older_than_hours: float = 0.0, session: str | None = None) -> d
     return {"moved": moved, "remaining": buffer_counts()}
 
 
+def _older_newer(a: str, b: str, ts_by_id: dict) -> tuple[str, str]:
+    """Order two candidate ids by capture time, oldest first. ts is ISO-ish and sorts
+    lexicographically; a missing ts falls back to the id so a pair is always returned."""
+    ta, tb = ts_by_id.get(a, ""), ts_by_id.get(b, "")
+    if ta and tb and ta != tb:
+        return (a, b) if ta < tb else (b, a)
+    return (a, b) if a <= b else (b, a)
+
+
 def doctor(memory_dir: str | None = None, targets: list[str] | None = None,
           needle: str | None = None) -> list[dict]:
     """Read-only hygiene report.
@@ -642,7 +651,9 @@ def doctor(memory_dir: str | None = None, targets: list[str] | None = None,
                 if nlow in text.lower():
                     out.append({"issue": "stale-value-in-memory", "file": p,
                                 "value": needle})
-    pool = [(c["id"], c.get("_body", "")) for c in list_candidates(with_body=True)]
+    pool_records = list_candidates(with_body=True)
+    pool = [(c["id"], c.get("_body", "")) for c in pool_records]
+    pool_ts = {c["id"]: str(c.get("ts", "")) for c in pool_records}
     for i in range(len(pool)):
         for j in range(i + 1, len(pool)):
             sim = similarity(pool[i][1], pool[j][1])
@@ -656,8 +667,16 @@ def doctor(memory_dir: str | None = None, targets: list[str] | None = None,
             elif sim >= CONTRADICTION_OVERLAP:
                 mi, mj = bool(_CORRECTION.search(pool[i][1])), bool(_CORRECTION.search(pool[j][1]))
                 if mi != mj:
+                    # Name the older/newer side so a person does not diff two timestamps by
+                    # eye: the older record is the claim, the newer one is the correction.
+                    # The suggestion is a command to RUN, never one this code runs -
+                    # superseding on a keyword match could kill a true memory, so the gate
+                    # stays human.
+                    older, newer = _older_newer(pool[i][0], pool[j][0], pool_ts)
                     out.append({"issue": "contradicting-candidates",
-                                "pair": [pool[i][0], pool[j][0]], "similarity": round(sim, 2)})
+                                "pair": [pool[i][0], pool[j][0]], "similarity": round(sim, 2),
+                                "older": older, "newer": newer,
+                                "suggest": "sleep.py supersede %s %s" % (older, newer)})
     cutoff_hours = STALE_CANDIDATE_WEEKS * 7 * 24
     for c in list_candidates():
         if c.get("status") != "provisional":
