@@ -53,7 +53,7 @@ IDX_END = "<!-- sleep:end -->"
 
 # ------------------------------------------------------------- frontmatter --
 def emit(record: dict, body: str = "") -> str:
-    order = ["id", "ts", "source", "trust", "kind", "status", "session", "cwd",
+    order = ["id", "ts", "event_at", "source", "trust", "kind", "status", "session", "cwd",
              "tags", "evidence", "supersedes", "superseded_by",
              "valid_from", "valid_until", "redacted", "notes"]
     # Known fields first in a stable order, then anything else the record carries.
@@ -324,7 +324,8 @@ def record_injection(ids: list[str]) -> int:
 def add_candidate(text: str, kind: str = "fact", source: str = "agent",
                   trust: str = "observed", session: str = "", cwd: str = "",
                   evidence: list[str] | None = None, supersedes: list[str] | None = None,
-                  notes: str = "", tags: list[str] | None = None) -> tuple[bool, str]:
+                  notes: str = "", tags: list[str] | None = None,
+                  event_at: str = "") -> tuple[bool, str]:
     """T1: distilled, provisional. Never injected as a directive."""
     text = (text or "").strip()
     if not text:
@@ -360,13 +361,19 @@ def add_candidate(text: str, kind: str = "fact", source: str = "agent",
         return False, "duplicate of earlier refusal %s (%.2f); this idea was judged and rejected" % (
             ref_id, ref_score)
 
+    ts = paths.now()
+    # Trust the caller's own statement when it gives one; otherwise read a date out of
+    # the record's own wording. Never invent: an empty event_at means the record does
+    # not say when the described thing happened, which is a different fact from ts.
+    event_at = _valid_event_at(event_at, ts) or stated_event_at(red, ts)
     rec = {
         "id": paths.new_id("c"),
-        "ts": paths.now(),
+        "ts": ts,
         "source": source if source in safety.SOURCES else "inferred",
         "trust": safety.cap_trust(source, trust),
         "kind": kind if kind in KINDS else "fact",
         "status": "provisional",
+        "event_at": event_at,
         "session": session or os.environ.get("SLEEP_SESSION", ""),
         "cwd": cwd or os.getcwd(),
         "tags": "|".join(_clean_tags(tags)),
@@ -822,6 +829,41 @@ def prune_buffer(older_than_hours: float = 0.0, session: str | None = None) -> d
 # propose them, which is exactly why they are normalized here rather than trusted.
 MAX_TAGS = 6
 MAX_TAG_CHARS = 32
+
+
+# The two clocks are separate: `ts` is when the record was written (always set), and
+# `event_at` is when the thing being described actually happened (only set when the
+# record states it). Backfilling event_at from ts would manufacture a fact nobody
+# recorded, and every later "where was X in October" question would answer with the
+# capture date. Empty means unknown, and unknown is reported as unknown.
+_DATE_RE = re.compile(r"\b(\d{4}-\d{2}-\d{2})\b")
+
+
+def _valid_event_at(value: str, ts: str = "") -> str:
+    """Accept a caller-stated event date only in YYYY-MM-DD form, never the capture day."""
+    m = _DATE_RE.fullmatch(str(value or "").strip())
+    if not m:
+        return ""
+    if ts and m.group(1) in ts[:10]:
+        return ""
+    return m.group(1)
+
+
+def stated_event_at(text: str, fallback_ts: str = "") -> str:
+    """Return a date the record's own wording states, else "".
+
+    Deliberately a literal match, not an inference: a relative phrasing ("last week")
+    is left to the model that reads the record, and this only accepts a date the text
+    spells out. A date equal to the capture day is not an event time either - it is
+    the same clock, and writing it twice would invent a distinction.
+    """
+    m = _DATE_RE.search(text or "")
+    if not m:
+        return ""
+    value = m.group(1)
+    if fallback_ts and value in fallback_ts[:10]:
+        return ""
+    return value
 
 
 def _clean_tags(tags) -> list:

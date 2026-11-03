@@ -180,7 +180,7 @@ class Sandbox(unittest.TestCase):
     # --------------------------------------------------------------- fixtures --
     def seed_candidate(self, cid, body, source="user", trust="verified", kind="fact",
                        status="provisional", cwd=None, session="seed",
-                       ts="2026-01-01T00:00:00+0300", tags=None):
+                       ts="2026-01-01T00:00:00+0300", tags=None, event_at=None):
         """Write one T1 file by hand.
 
         Candidates are normally produced by `distill`, and distill is a model call,
@@ -192,6 +192,7 @@ class Sandbox(unittest.TestCase):
         meta = [("id", cid), ("ts", ts), ("source", source),
                 ("trust", trust), ("kind", kind), ("status", status),
                 ("session", session), ("cwd", cwd or self.proj_a),
+                ("event_at", event_at if event_at is not None else ""),
                 ("tags", "|".join(tags or [])),
                 ("evidence", ""), ("supersedes", ""), ("superseded_by", ""),
                 ("redacted", "false"), ("notes", "")]
@@ -361,6 +362,10 @@ class T0Capture(Sandbox):
 
 class StatusShowInject(Sandbox):
     """status, show and inject: the read side, which must never cost a model call."""
+
+    # A fixed capture date, so "an event date equal to the capture day" is testable
+    # instead of racing the wall clock.
+    EVENT_TS = "2026-11-03T19:00:00+0300"
 
     def seed_pool(self):
         self.cli("capture", "--text", "first observation", "--session", "st")
@@ -602,6 +607,40 @@ class StatusShowInject(Sandbox):
         self.assertEqual(self.cli("inject", "--project", self.proj_a, "--topic", "deployments").returncode, 0)
         untagged = self.cli("inject", "--project", self.proj_a, "--topic", "note")
         self.assertEqual(untagged.stdout.strip(), "")
+
+    def test_show_separates_the_capture_clock_from_the_event_clock(self):
+        """A record written today about something that happened in October carries two
+        dates. Showing only `ts` answers "when was this written" while the question
+        people actually ask is "when was this true"."""
+        self.seed_candidate("cevent", "On 2026-10-14 the staging host moved to venus.internal.",
+                            cwd=self.proj_a, event_at="2026-10-14")
+        got = self.cli("show", "cevent")
+        self.assertEqual(got.returncode, 0, got.stderr)
+        self.assertIn("event_at: 2026-10-14", got.stdout)
+        self.assertIn("recorded %s" % self.EVENT_TS[:4], got.stdout)
+        self.assertIn("the recorded event happened 2026-10-14", got.stdout)
+
+    def test_show_says_nothing_about_an_event_clock_when_the_record_states_no_date(self):
+        self.seed_candidate("cnoevent", "The staging host moved to venus.internal.", cwd=self.proj_a)
+        got = self.cli("show", "cnoevent")
+        self.assertEqual(got.returncode, 0, got.stderr)
+        self.assertNotIn("two clocks", got.stdout)
+        # the empty key itself is part of the pinned frontmatter shape, so the
+        # assertion is about the sentence, not the field name
+        self.assertIn("event_at: \n", got.stdout)
+
+    def test_an_event_date_equal_to_the_capture_day_is_not_an_event_date(self):
+        """Two clocks showing the same value is the caption, not the distinction. A
+        record that names today would otherwise claim a separate event time it never
+        had."""
+        # The validator runs on the capture path, so drive it there with the sandbox
+        # home: the buffer record is what carry_over later turns into a candidate.
+        today = self.cli("capture", "--session", "same-day",
+                         stdin="Deploy happened on %s while we watched." % self.EVENT_TS[:10])
+        self.assertEqual(today.returncode, 0, today.stderr)
+        rec = self.buffer_records()[-1]
+        self.assertEqual(rec.get("event_at", ""), "",
+                         "a date equal to the capture day is not a second clock")
 
     def test_inject_keeps_user_confirmed_targets_unmasked(self):
         # source=user + trust=verified is the human's own confirmed words: it may

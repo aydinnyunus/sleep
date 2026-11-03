@@ -155,6 +155,10 @@ def cmd_show(a) -> int:
         return 2
     meta, body = got
     _p(store.emit(meta, body))
+    event_at = str(meta.get("event_at") or "").strip()
+    if event_at:
+        _p("# two clocks: recorded %s, the recorded event happened %s"
+           % (str(meta.get("ts", "?"))[:10], event_at))
     # Show the supersede chain: with only the two pointer fields visible, answering
     # "which record is current, and what did it replace?" means reading other files.
     chain = store.supersession_chain(a.id)

@@ -19,6 +19,8 @@ Each proposal is header fields, a blank line, then the observation:
     kind: fact | preference | procedure | warning
     trust: verified | observed | speculative
     tags: <1-4 pipe-separated lowercase topics, e.g. deploy|aws or gitlab|auth>
+    event_at: <optional YYYY-MM-DD, ONLY when the observation itself states a date for
+      the thing you are describing; omit the line when it does not>
     evidence: <optional, comma separated file paths or session refs>
 
     <one observation, 1-3 sentences, written so a reader in a future session can
@@ -56,5 +58,9 @@ here.
 - The `tags` line is the only index a future session can filter on: use the
   topic words a person would search for (deploy, gitlab, auth), not the
   sentence's verbs. Never repeat the kind as a tag.
+- `event_at` is only for a date the observation already states about the thing it
+  describes ("on 2026-10-14 the staging host moved"). Never derive it from what you
+  know, never write the session's own date, and omit the line otherwise: the record
+  keeps two separate clocks and an empty `event_at` means "the record does not say".
 - Proposals are cheap and refusals are cheap; a poisoned memory store is not. When
   in doubt, emit fewer and mark the remainder `speculative`.
