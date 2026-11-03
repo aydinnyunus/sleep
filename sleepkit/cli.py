@@ -151,6 +151,15 @@ def cmd_show(a) -> int:
         return 2
     meta, body = got
     _p(store.emit(meta, body))
+    # Show the supersede chain: with only the two pointer fields visible, answering
+    # "which record is current, and what did it replace?" means reading other files.
+    chain = store.supersession_chain(a.id)
+    if len(chain["order"]) > 1 or chain["broken"]:
+        _p("# supersede chain (oldest -> newest):")
+        _p("  " + " -> ".join(chain["order"]))
+        _p("  current: %s" % chain["current"])
+        for gone in chain["broken"]:
+            _p("  BROKEN: %s is referenced but not in the store" % gone)
     _p("# rendered for context:\n" + safety.render_for_context(
         {"text": body, "source": meta.get("source"), "trust": meta.get("trust")}))
     return 0

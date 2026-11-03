@@ -638,6 +638,83 @@ def demote(cid: str, memory_dir: str | None = None, dry_run: bool = False,
     return True, ("retracted %s" % (slug or cid)
                   + (" (T2 default not found)" if not t2_ok else ""))
 
+def _first_ref(value) -> str:
+    """One id out of a supersede field, which parse() returns as a LIST.
+
+    store.parse() turns tags/evidence/supersedes/superseded_by into lists, so treating
+    the value as a string produced repr text like "['c1']" and every chain walk missed.
+    Accepts either shape and takes the first entry.
+    """
+    if isinstance(value, (list, tuple)):
+        return str(value[0]).strip() if value else ""
+    return str(value or "").split("|")[0].strip()
+
+
+def _archived_candidates() -> list:
+    """Parsed frontmatter of archived candidates (promoted/superseded records live there)."""
+    out = []
+    d = paths.archive_dir("candidates")
+    if not os.path.isdir(d):
+        return out
+    for name in sorted(os.listdir(d)):
+        if not name.endswith(".md"):
+            continue
+        try:
+            with open(os.path.join(d, name), encoding="utf-8") as fh:
+                meta, _body = parse(fh.read())
+        except (OSError, ValueError):
+            continue
+        out.append(meta)
+    return out
+
+
+def supersession_chain(cid: str, max_hops: int = 20) -> dict:
+    """Walk a record's supersede links in both directions.
+
+    A supersede writes one pointer on each side, so the *chain* is only visible by
+    following them: after three changes, "which record is current?" costs reading files.
+    Returns {"order": [oldest..newest], "current": id, "broken": [ids]} - `broken` names
+    ids that are referenced but missing from the store, which is how a hand-edited or
+    partially archived chain shows up instead of silently reading as a two-record story.
+    """
+    seen_up, chain = set(), []
+    node = cid
+    while node and node not in seen_up and len(chain) < max_hops:
+        seen_up.add(node)
+        chain.append(node)
+        got = get_candidate(node)
+        if not got:
+            break
+        node = _first_ref(got[0].get("supersedes"))
+    order = list(reversed(chain))          # oldest -> newest
+    missing = []
+    if order and not get_candidate(order[0]):
+        missing.append(order[0])
+    # Walk forward from the OLDEST end, not from the requested id: asking about the
+    # replaced record must still report what replaced it.
+    # Forward walk: follow superseded_by from whatever end we know, always extending the
+    # NEWEST side. It is not gated on the seed id (the oldest member has no supersedes and
+    # would otherwise stop the walk before it ever looked forward).
+    node = order[-1] if order else cid
+    seen_down = set(order)
+    while node and len(order) < max_hops:
+        got = get_candidate(node)
+        if not got:
+            break
+        nxt = _first_ref(got[0].get("superseded_by"))
+        if not nxt or nxt in seen_down:
+            break
+        seen_down.add(nxt)
+        if get_candidate(nxt):
+            order.append(nxt)
+            node = nxt
+        else:
+            missing.append(nxt)
+            break
+    current = order[-1] if order else cid
+    return {"order": order, "current": current, "broken": missing}
+
+
 def supersede(old_id: str, new_id: str) -> bool:
     """Mark old_id invalid as of now and new_id valid as of now.
 
@@ -808,6 +885,19 @@ def doctor(memory_dir: str | None = None, targets: list[str] | None = None,
     # Report the count and the newest ids; nothing is dropped or changed here.
     # Path assembled without paths.home(): home() creates the whole tier skeleton as a
     # side effect, and a read-only report that lays down directories is not read-only.
+    # A supersede writes a pointer on each side, so a link can dangle: the file was
+    # pruned, the archive lost it, or a hand edit dropped it. A dangling link reads as
+    # "this record replaced something" while the something is unrecoverable - worth one
+    # line, since it is invisible in every other view.
+    for c in list_candidates(with_body=False) + _archived_candidates():
+        cid = c.get("id")
+        if not cid:
+            continue
+        for field in ("supersedes", "superseded_by"):
+            target = _first_ref(c.get(field))
+            if target and not get_candidate(target):
+                out.append({"issue": "broken-supersede-link", "id": cid,
+                            "field": field, "missing": target})
     qdir = os.path.join(paths.SLEEP_HOME, ".quarantine")
     if os.path.isdir(qdir):
         parked = sorted(f for f in os.listdir(qdir) if f.endswith(".json"))

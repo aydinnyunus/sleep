@@ -666,6 +666,55 @@ class Gates(Sandbox):
         self.assertEqual(len(backups), 1, backups)
         self.assertIn("# Index", self.read(os.path.join(bdir, backups[0])))
 
+    def test_show_prints_the_supersede_chain_from_either_end(self):
+        """A supersede pointer is one hop. Answering "which record is current, and what
+        did it replace?" used to cost reading other files, so `show` walks the links.
+
+        Both ends must print the same chain: asking about the replaced record is the
+        common case (a capture contradicts something already known)."""
+        self.seed_candidate("c_v1", "The staging URL is staging.example.io/v1.", cwd=self.proj_a)
+        self.seed_candidate("c_v2", "The staging URL is staging.example.io/v2.", cwd=self.proj_a)
+        self.seed_candidate("c_v3", "The staging URL is staging.example.io/v3.", cwd=self.proj_a)
+        self.assertEqual(self.cli("supersede", "c_v1", "c_v2").returncode, 0)
+        self.assertEqual(self.cli("supersede", "c_v2", "c_v3").returncode, 0)
+        for asked, other in (("c_v1", "c_v3"), ("c_v2", "c_v3"), ("c_v3", "c_v1")):
+            got = self.cli("show", asked)
+            self.assertEqual(got.returncode, 0, got.stdout + got.stderr)
+            self.assertIn("supersede chain", got.stdout, asked)
+            self.assertIn("c_v1 -> c_v2 -> c_v3", got.stdout, asked)
+            self.assertIn("current: c_v3", got.stdout, asked)
+            self.assertIn(other, got.stdout, asked)
+
+    def test_show_reports_a_link_to_a_record_that_is_gone(self):
+        """A dangling pointer reads as "this replaced something" while the something is
+        unrecoverable. Naming it beats silently printing a one-record story."""
+        self.seed_candidate("c_dangling", "Some fact.", cwd=self.proj_a)
+        path = os.path.join(self.sleep_home, "candidates", "c_dangling.md")
+        body = self.read(path).replace("supersedes: ", "supersedes: c_missing1")
+        self.write(path, body)
+        got = self.cli("show", "c_dangling")
+        self.assertEqual(got.returncode, 0, got.stdout + got.stderr)
+        self.assertIn("BROKEN", got.stdout)
+        self.assertIn("c_missing1", got.stdout)
+
+    def test_doctor_flags_a_broken_supersede_link(self):
+        self.seed_candidate("c_dangling", "Some fact.", cwd=self.proj_a)
+        path = os.path.join(self.sleep_home, "candidates", "c_dangling.md")
+        self.write(path, self.read(path).replace("superseded_by: ", "superseded_by: c_missing2"))
+        issues = json.loads(self.cli("doctor", "--json").stdout)
+        broken = [i for i in issues if i["issue"] == "broken-supersede-link"]
+        self.assertEqual(len(broken), 1, issues)
+        self.assertEqual(broken[0]["id"], "c_dangling")
+        self.assertEqual(broken[0]["missing"], "c_missing2")
+
+    def test_show_of_an_unchained_record_prints_no_chain_block(self):
+        """The chain block is information, not boilerplate: a record nobody superseded
+        must not grow three extra lines."""
+        self.seed_candidate("c_alone", "A lone fact.", cwd=self.proj_a)
+        got = self.cli("show", "c_alone")
+        self.assertEqual(got.returncode, 0, got.stdout + got.stderr)
+        self.assertNotIn("supersede chain", got.stdout)
+
     def test_supersede_stamps_the_validity_window_on_both_records(self):
         """A supersede pointer says which record replaced this one, not when the old
         value stopped being true. Both ends are stamped so a temporal question can be
