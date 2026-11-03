@@ -38,7 +38,13 @@ Sleep adds a reviewable memory cycle to nine selectable coding-agent targets. It
   the thing it describes actually happened, and it is written **only when the record
   states a date** (a date equal to the capture day is not a second clock). An empty
   `event_at` means the record does not say, never a guess, so `show` can answer
-  "when was this true" without inventing an event time.
+  "when was this true" without inventing an event time. Both clocks are read, not just
+  stored: when `doctor` flags a contradicting pair it names the older side as the claim
+  on the pair's `event_at` (falling back to `ts` when neither record states a date), so
+  a fact you file today about a state that was already superseded is not handed back as
+  the newer claim; injection appends `(described a state Nd old)` when the two clocks
+  differ, and the adjudicator model is shown both, named as older or newer than the
+  capture.
 - **Tagged records.** Consolidation writes 1-4 lowercase topic tags per record (`deploy|aws`),
   normalized and capped in `store`, and `inject --topic` selects on them. A tag is a
   hint a model proposed, so a wrong tag costs a missing filter hit, never a wrong fact.

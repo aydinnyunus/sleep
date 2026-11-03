@@ -467,3 +467,32 @@ used `===PROPOSAL===` only as a closing marker. The parser discarded everything 
 marker. `sleepkit.consolidate.split_blocks()` now preserves a leading contract-shaped proposal while
 still discarding ordinary preamble, pinned by
 `test_closing_proposal_marker_preserves_leading_proposal`.
+
+
+## 2026-11-03: world-time ordering for contradicting records
+
+`doctor` named the older side of a contradicting pair by capture time (`ts`), which is the
+store's clock and not the claim's. An agent that files an old fact today - a document quote
+saying the deploy host is X, recorded yesterday, while a person corrected it in the store a week
+ago - therefore looked like the *newer* claim, and the suggested command
+(`supersede <older> <newer>`) pointed the wrong way.
+
+The pair now carries both clocks as `(ts, event_at)`, in the T1 shortlist and in
+`permanent_records`, and one axis decides each comparison: `event_at` when both records state a
+date, the `ts` pair otherwise, the id when neither does. Each comparison runs on a single axis
+because the first version preferred each record's own clock (`ta or ea`), which is just `ts`
+again for any record carrying both, and it reproduced the inverted advice the change exists to
+fix. `inject` appends `(described a state Nd old)` only when the two clocks differ, and the
+adjudicator prompt now shows both clocks with their relation
+(`event_at=2026-10-01 (older state, recorded 2026-11-02)`).
+
+Pinned by `test_a_late_note_about_an_old_state_is_named_the_claim_not_the_correction`,
+`test_without_a_stated_date_the_capture_order_still_decides`,
+`test_the_adjudicator_is_shown_both_clocks_and_their_relation` (all in `tests/test_cli.py`,
+crossing a process boundary with a prompt-recording fake model),
+`test_permanent_records_carry_both_clocks_not_a_bare_ts` and
+`test_ordering_prefers_the_stated_date_and_falls_back_to_capture_time` (`tests/test_core.py`).
+
+Not changed, and named here so the leftover is not mistaken for coverage: `candidate_pairs()`
+still orders by `ts` and still makes one model call per pair, and `cmd_doctor` does not call it.
+It is a duplicate of the ordering rule with a per-pair cost, left alone deliberately.

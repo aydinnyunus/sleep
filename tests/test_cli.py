@@ -1227,6 +1227,69 @@ class Doctor(Sandbox):
         self.assertEqual(len(hit), 1, issues)
         self.assertEqual(sorted(hit[0]["pair"]), ["cnew", "cold"])
 
+    def test_a_late_note_about_an_old_state_is_named_the_claim_not_the_correction(self):
+        """Two clocks, and a case where reading them the wrong way inverts the advice.
+
+        A session can file an old fact today: an agent reads a document quote saying the
+        host is mars.internal yesterday, while a person already corrected it in the
+        store a week ago. Ordered by capture time ts, the document quote looks like the
+        newer claim and doctor would hand back `supersede <live record> <stale quote>`,
+        which is exactly backwards. Ordered on when the described state was true, the
+        quote is the older claim and the correction is named as what replaces it.
+        """
+        self.seed_candidate("cdoc", "The deploy host is mars.internal and we push from prod.",
+                            cwd=self.proj_a, ts="2026-11-02T09:00:00+0300",
+                            event_at="2026-10-01")
+        self.seed_candidate("cfix", "The deploy host is no longer mars.internal; we push from staging now.",
+                            cwd=self.proj_a, ts="2026-10-26T09:00:00+0300",
+                            event_at="2026-10-26")
+        issues = json.loads(self.cli("doctor", "--json").stdout)
+        hit = [i for i in issues if i["issue"] == "contradicting-candidates"]
+        self.assertEqual(len(hit), 1, issues)
+        self.assertEqual(hit[0]["older"], "cdoc",
+                         "the late note describes the older state, so it is the claim")
+        self.assertEqual(hit[0]["newer"], "cfix")
+        self.assertIn("supersede cdoc cfix", hit[0]["suggest"])
+
+    def test_without_a_stated_date_the_capture_order_still_decides(self):
+        """The fallback is not dead code: most records carry no stated date, and for
+        those the capture order remains the only signal. Pinned so a change to the
+        world-time rule cannot quietly reverse the common case."""
+        self.seed_candidate("cold", "The deploy host is mars.internal and we push from prod.",
+                            cwd=self.proj_a, ts="2026-01-01T00:00:00+0300")
+        self.seed_candidate("cnew", "The deploy host is no longer mars.internal; we push from staging now.",
+                            cwd=self.proj_a, ts="2026-01-05T00:00:00+0300")
+        issues = json.loads(self.cli("doctor", "--json").stdout)
+        hit = [i for i in issues if i["issue"] == "contradicting-candidates"]
+        self.assertEqual(len(hit), 1, issues)
+        self.assertEqual((hit[0]["older"], hit[0]["newer"]), ("cold", "cnew"))
+
+    def test_the_adjudicator_is_shown_both_clocks_and_their_relation(self):
+        """The model decides which record needs a human verdict, so the payload it gets
+        is part of the contract. A prompt carrying only the capture ts hands the model a
+        late note about an old state and reads as the newer claim; the world clock has
+        to travel with it, named as older or newer than the capture so the model does
+        not have to compare two date formats itself."""
+        self.seed_candidate("cdoc", "The deploy host is mars.internal and we push from prod.",
+                            cwd=self.proj_a, ts="2026-11-02T09:00:00+0300",
+                            event_at="2026-10-01")
+        self.seed_candidate("cfix", "The deploy host is no longer mars.internal; we push from staging now.",
+                            cwd=self.proj_a, ts="2026-10-26T09:00:00+0300",
+                            event_at="2026-10-26")
+        fake = os.path.join(self.bin, "fake-claude-prompt")
+        self.write(fake, FAKE_CLAUDE_PROMPT_RECORDING)
+        os.chmod(fake, 0o755)
+        out = os.path.join(self.tmp, "prompt.txt")
+        got = self.cli("doctor", "--contradictions", "--budget", "0.30",
+                       CLAUDE_BIN=fake, SLEEP_TEST_PROMPT_OUT=out)
+        self.assertEqual(got.returncode, 0, got.stdout + got.stderr)
+        sent = self.read(out)
+        self.assertIn("event_at=2026-10-01", sent,
+                      "the stated date must reach the model, not just the capture ts")
+        self.assertIn("older state, recorded", sent,
+                      "the relation between the two clocks is the thing the model reads")
+        self.assertIn("event_at=2026-10-26", sent)
+
     def test_the_contradiction_report_names_the_side_to_supersede_without_doing_it(self):
         """The pair is only useful if the person can act on it in one step. The report must
         name which record is older (the claim) and which is newer (the correction), and
@@ -2230,6 +2293,25 @@ pair = {"pair": 1, "contradiction": bool(has_bodies), "older": "m_old", "newer":
 print(json.dumps([{"type": "system", "subtype": "init"},
                   {"type": "result", "subtype": "success",
                    "result": json.dumps({"pairs": [pair]})}]))
+"""
+
+FAKE_CLAUDE_PROMPT_RECORDING = """#!/usr/bin/env python3
+# Stand-in for `claude --output-format json` during doctor --contradictions that writes
+# the user prompt it received to the path in SLEEP_TEST_PROMPT_OUT before answering.
+# A fake which only returns a canned verdict cannot show what the shortlist actually
+# sent; this one exists so the payload itself is the thing under test.
+import json
+import os
+import sys
+
+prompt = sys.stdin.read()
+out = os.environ.get("SLEEP_TEST_PROMPT_OUT")
+if out:
+    with open(out, "w", encoding="utf-8") as fh:
+        fh.write(prompt)
+print(json.dumps([{"type": "system", "subtype": "init"},
+                  {"type": "result", "subtype": "success",
+                   "result": json.dumps({"pairs": []})}]))
 """
 
 

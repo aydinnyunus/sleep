@@ -892,6 +892,43 @@ class MaskUnverifiedTargets(unittest.TestCase):
         out2, hit2 = self.mask("version 1.2.3 and 4.5.6 are released")
         self.assertFalse(hit2)
 
+    def test_permanent_records_carry_both_clocks_not_a_bare_ts(self):
+        """The T2 shortlist feeds the same ordering helper as T1, so it has to carry the
+        same two clocks. It once returned a bare ts while the helper grew to expect a
+        (ts, event_at) pair, a mismatch whose only symptom would be a wrong supersede
+        suggestion on a person's approved memory."""
+        mdir = os.path.join(TMP, "two-clock-mem")
+        os.makedirs(mdir, exist_ok=True)
+        with open(os.path.join(mdir, "deploy.md"), "w", encoding="utf-8") as fh:
+            fh.write("---\nid: m_host\nts: 2026-11-02T09:00:00+0300\n"
+                     "event_at: 2026-10-01\nstatus: promoted\n---\n"
+                     "The deploy host is mars.internal.\n")
+        got = store.permanent_records(mdir)
+        self.assertEqual(len(got), 1, got)
+        ref, body, clocks = got[0]
+        self.assertEqual(ref, "m_host")
+        self.assertIsInstance(clocks, tuple, "a bare ts here is the shape that broke ordering")
+        self.assertEqual(clocks, ("2026-11-02T09:00:00+0300", "2026-10-01"))
+
+    def test_ordering_prefers_the_stated_date_and_falls_back_to_capture_time(self):
+        """One axis per comparison. When both records state when their claim was true, that
+        is the axis; when neither does, the capture ts pair is. Mixing one side's ts with
+        the other's event_at compares two different clocks and just relocates the bug."""
+        both = {"late": ("2026-11-02T09:00:00+0300", "2026-10-01"),
+                "fix": ("2026-10-26T09:00:00+0300", "2026-10-26")}
+        self.assertEqual(store._older_newer("late", "fix", both), ("late", "fix"),
+                         "the late note describes the older state, so it is the claim")
+        no_dates = {"old": ("2026-01-01T00:00:00+0300", ""),
+                    "new": ("2026-01-05T00:00:00+0300", "")}
+        self.assertEqual(store._older_newer("new", "old", no_dates), ("old", "new"))
+        # only one side states a date: the capture ts pair decides for both, and the
+        # helper never compares a ts against an event_at
+        mixed = {"a": ("2026-01-01T00:00:00+0300", ""),
+                 "b": ("2026-01-05T00:00:00+0300", "2026-03-01")}
+        self.assertEqual(store._older_newer("a", "b", mixed), ("a", "b"))
+        # both clocks unknown: the id keeps the pair defined and the command runnable
+        self.assertEqual(store._older_newer("zz", "aa", {}), ("aa", "zz"))
+
     def test_doctor_needle_flags_approved_memory_holding_a_stale_value(self):
         mdir = os.path.join(TMP, "stale-mem")
         os.makedirs(mdir, exist_ok=True)

@@ -208,10 +208,16 @@ def cmd_prune(a) -> int:
 
 
 def _doctor_shortlist() -> list:
-    """(id, body, ts) for every provisional record, the input to candidate_pairs."""
+    """(id, body, (ts, event_at)) for provisional records, the input to candidate_pairs.
+
+    Both clocks travel: `ts` is when the store first held the claim, `event_at` is when
+    the record says the described thing was true. Deciding which of two records is the
+    older claim is a world-time question, and a session that files an old fact today
+    makes ts alone pick the wrong side."""
     out = []
     for c in store.list_candidates(status="provisional", with_body=True):
-        out.append((c["id"], c.get("_body", "") or "", str(c.get("ts", ""))))
+        out.append((c["id"], c.get("_body", "") or "",
+                    (str(c.get("ts", "")), str(c.get("event_at", "")))))
     return out
 
 
@@ -248,8 +254,18 @@ def _llm_contradictions(pairs: list, budget: float, model: str | None,
         lines.append("Pair %d:" % i)
         for cid in (older, newer):
             meta, body = seen.get(cid, ({}, ""))
-            lines.append("  id=%s ts=%s body=%s" % (cid, meta.get("ts", "?"),
-                                                   (body or "").replace("\n", " ").strip()))
+            # Both clocks and the relation between them: a record learned long after the
+            # state it describes is the late note here, and a model shown only `ts` would
+            # read it as the newer claim and propose superseding the true memory.
+            ts = str(meta.get("ts", "?"))
+            event_at = str(meta.get("event_at", "") or "")
+            if event_at and event_at[:10] != ts[:10]:
+                when = "ts=%s event_at=%s (%s state, recorded %s)" % (
+                    ts, event_at, "older" if event_at < ts else "newer", ts[:10])
+            else:
+                when = "ts=%s event_at=%s" % (ts, event_at or "unknown")
+            lines.append("  id=%s %s body=%s" % (cid, when,
+                                                (body or "").replace("\n", " ").strip()))
     if tier in ("t2", "both"):
         user = ("Memory records, grouped into candidate pairs. Some are unreviewed "
                 "provisional candidates; some are permanent memories a human already "
@@ -321,7 +337,7 @@ def _llm_contradictions(pairs: list, budget: float, model: str | None,
 
 
 def _doctor_memory_shortlist(memory_dir: str | None = None) -> list:
-    """(id, body, ts) for every active permanent T2 record, the input to candidate_pairs."""
+    """(id, body, (ts, event_at)) for active permanent T2 records, same two clocks as T1."""
     return store.permanent_records(memory_dir)
 
 
@@ -329,7 +345,8 @@ def _memory_records(memory_dir: str | None = None) -> dict:
     """id -> (meta, body) for active permanent records, the lookup the adjudicator needs."""
     out = {}
     for cid, body, ts in store.permanent_records(memory_dir):
-        out[cid] = ({"id": cid, "ts": ts}, body)
+        ts, event_at = ts if isinstance(ts, (tuple, list)) else (ts, "")
+        out[cid] = ({"id": cid, "ts": ts, "event_at": event_at}, body)
     return out
 
 
@@ -491,6 +508,23 @@ def _age_label(ts: str):
     return "%dd ago" % int(hours // 24)
 
 
+def _world_age_label(ts: str, event_at: str):
+    """Age of the state a record describes, in days, when that differs from `ts`.
+
+    Two clocks, and the gap between them is the point: `ts` says when this store first
+    held the claim, `event_at` says when the record itself says the thing was true. A
+    fact read out of a six-month-old document yesterday carries both, and a model told
+    only "recorded 1d ago" reads it as current. Returns None when the two agree to the
+    day, because saying the same thing twice is noise, and None on an unparseable value
+    rather than a guessed number.
+    """
+    a = store._hours_since(ts) if ts else None
+    b = store._hours_since(event_at) if event_at else None
+    if a is None or b is None or int(a // 24) == int(b // 24):
+        return None
+    return int(b // 24)
+
+
 def _inject_rank(records: list, query: str) -> list:
     """Order records by overlap with ``query``, newest first as the tie-break.
 
@@ -570,6 +604,12 @@ def cmd_inject(a) -> int:
         age = _age_label(c.get("ts", ""))
         if age:
             line += "  (recorded %s)" % age
+        # Separately, and only when it differs: how old the state the record describes
+        # is. "recorded 1d ago, true 180d ago" is a late note about an old world, and a
+        # reader that only sees the first half takes it for current.
+        world = _world_age_label(c.get("ts", ""), c.get("event_at", ""))
+        if world is not None:
+            line += " (described a state %dd old)" % world
         recs.append(line)
         served.append(c.get("id", ""))
     if not recs:

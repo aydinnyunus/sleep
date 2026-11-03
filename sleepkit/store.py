@@ -720,7 +720,12 @@ def permanent_records(memory_dir: str | None = None) -> list:
         if meta.get("status") == "retracted":
             continue
         ref = str(meta.get("id") or name[:-3]).strip()
-        out.append((ref, body or "", str(meta.get("ts") or meta.get("promoted_at") or "")))
+        # The recorded claim time, not the promotion date: a memory written down long after
+        # the fact is a late note about an old state. Carried as (claim_time, event_at) so
+        # _older_newer can read the same two clocks the T1 shortlist carries.
+        out.append((ref, body or "",
+                    (str(meta.get("ts") or meta.get("promoted_at") or ""),
+                     str(meta.get("event_at") or ""))))
     return out
 
 
@@ -921,12 +926,43 @@ def candidate_pairs(recs: list, limit: int = CONTRADICTION_MAX_PAIRS) -> list:
     return [(o, n) for _s, o, n in scored[:limit]]
 
 
+def _clock(entry) -> tuple[str, str]:
+    """Accept either the old bare-ts map value or this module's (ts, event_at) pair."""
+    if isinstance(entry, (tuple, list)):
+        ts = str(entry[0] or "") if len(entry) > 0 else ""
+        ev = str(entry[1] or "") if len(entry) > 1 else ""
+        return ts, ev
+    return str(entry or ""), ""
+
+
 def _older_newer(a: str, b: str, ts_by_id: dict) -> tuple[str, str]:
-    """Order two candidate ids by capture time, oldest first. ts is ISO-ish and sorts
-    lexicographically; a missing ts falls back to the id so a pair is always returned."""
-    ta, tb = ts_by_id.get(a, ""), ts_by_id.get(b, "")
-    if ta and tb and ta != tb:
-        return (a, b) if ta < tb else (b, a)
+    """Order two candidate ids by the claim's own time, oldest first.
+
+    Which side is the claim and which is the correction is a statement about the world,
+    not about this store, so the ordering reads both clocks the record carries:
+
+      - ts is when the store first held the claim, event_at is when the record says the
+        described thing was true. A session can file an old fact today, so ts alone
+        would name a document quote recorded this morning as "the newer claim" and hand
+        back a supersede command pointing the wrong way.
+      - event_at wins whenever the pair can be compared on it at all, for BOTH sides.
+        Mixing the clocks (one side's ts against the other's event_at) compares two
+        different axes and just relocates the bug: the documented late note carries both,
+        so its ts would still be what the comparison read.
+      - With no stated date on either side, or on only one, the capture ts pair decides
+        and, when those tie or are missing, the id does. A pair is always returned, so
+        `supersede <older> <newer>` is always a runnable command.
+
+    Values may be a bare timestamp (older callers) or a (ts, event_at) pair.
+    """
+    ta, ea = _clock(ts_by_id.get(a, ""))
+    tb, eb = _clock(ts_by_id.get(b, ""))
+    # One axis per comparison: event_at when both records state one, capture ts otherwise.
+    ca, cb = (ea, eb) if (ea and eb) else (ta, tb)
+    if ca and cb and ca != cb:
+        return (a, b) if ca < cb else (b, a)
+    if ca != cb:
+        return (a, b) if not ca else (b, a)
     return (a, b) if a <= b else (b, a)
 
 
@@ -974,7 +1010,12 @@ def doctor(memory_dir: str | None = None, targets: list[str] | None = None,
                                 "value": needle})
     pool_records = list_candidates(with_body=True)
     pool = [(c["id"], c.get("_body", "")) for c in pool_records]
-    pool_ts = {c["id"]: str(c.get("ts", "")) for c in pool_records}
+    # Two clocks per record: ts is when this store first held the claim, event_at is when
+    # the record itself says the described thing was true. A session can learn an old fact
+    # today (ts new, event_at old), so "which side is the older claim" is a world-time
+    # question and cannot be answered from ts alone. The pair is (ts, event_at) and the
+    # ordering rule lives in _older_newer.
+    pool_ts = {c["id"]: (str(c.get("ts", "")), str(c.get("event_at", ""))) for c in pool_records}
     for i in range(len(pool)):
         for j in range(i + 1, len(pool)):
             sim = similarity(pool[i][1], pool[j][1])
@@ -990,6 +1031,8 @@ def doctor(memory_dir: str | None = None, targets: list[str] | None = None,
                 if mi != mj:
                     # Name the older/newer side so a person does not diff two timestamps by
                     # eye: the older record is the claim, the newer one is the correction.
+                    # "Older" is world time (_older_newer), so a record learned late about an
+                    # old state is still named as the claim and not as the fix.
                     # The suggestion is a command to RUN, never one this code runs -
                     # superseding on a keyword match could kill a true memory, so the gate
                     # stays human.
