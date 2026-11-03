@@ -547,6 +547,38 @@ class StatusShowInject(Sandbox):
         self.assertNotIn("/etc/nginx", got.stdout)
         self.assertIn("<redacted:unverified>", got.stdout)
 
+    def test_inject_carries_an_index_line_and_points_at_the_full_text(self):
+        """A long observation must not put its whole narrative in a session's context.
+        The index keeps what a session needs to judge relevance - the opening claim -
+        and names the command that opens the rest, so the disclosure is not a dead end."""
+        long_body = ("The staging deploy host is mars-staging.internal and deploys use the rsync path. "
+                     "Two caveats worth flagging to whoever reviews this: (1) the edit was observed "
+                     "but the resulting file was never read, and (2) nothing about the routing was "
+                     "confirmed, so any claim about it would be speculative certainty. "
+                     + "padding " * 12)
+        self.seed_candidate("clong", long_body, cwd=self.proj_a)
+        got = self.cli("inject", "--project", self.proj_a, "--max", "1")
+        self.assertEqual(got.returncode, 0, got.stderr)
+        self.assertIn("sleep.py show clong", got.stdout,
+                      "the index must name the command that opens the full record")
+        self.assertIn("[+", got.stdout)
+        self.assertNotIn("padding padding padding", got.stdout,
+                         "the bulk of a long body must not be carried by default")
+        index_chars = len(got.stdout)
+        full = self.cli("inject", "--project", self.proj_a, "--max", "1", "--full")
+        self.assertGreater(len(full.stdout), index_chars,
+                           "--full must still carry the whole body")
+        self.assertIn("padding padding padding", full.stdout)
+
+    def test_inject_short_record_is_unchanged_by_the_index(self):
+        """A record that fits in the index window is printed whole: the pointer would be
+        noise on a fact that is already one line."""
+        self.seed_candidate("cshort", "The internal GitLab needs a PAT with read_api scope.",
+                            cwd=self.proj_a)
+        got = self.cli("inject", "--project", self.proj_a, "--max", "1")
+        self.assertIn("read_api scope.", got.stdout)
+        self.assertNotIn("sleep.py show cshort", got.stdout)
+
     def test_inject_keeps_user_confirmed_targets_unmasked(self):
         # source=user + trust=verified is the human's own confirmed words: it may
         # name a concrete target and is never masked.

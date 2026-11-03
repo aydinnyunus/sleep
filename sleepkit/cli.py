@@ -506,10 +506,38 @@ def _inject_rank(records: list, query: str) -> list:
     return sorted(records, key=lambda c: c.get("ts", ""), reverse=True)
 
 
+INDEX_CHARS = 160
+
+
+def _index_line(body: str, cid: str) -> str:
+    """First sentence up to INDEX_CHARS, plus how much text and how to read the rest.
+
+    The pointer is the whole point: an index that hides the remainder without naming a
+    way to open it turns a disclosure step into a dead end.
+    """
+    text = " ".join((body or "").split())
+    if len(text) <= INDEX_CHARS:
+        return text
+    cut = text[:INDEX_CHARS]
+    stop = max(cut.rfind(". "), cut.rfind("; "))
+    if stop > 60:
+        cut = cut[: stop + 1]
+    else:
+        # no sentence ended inside the window: break on a word boundary rather than
+        # mid-token, then close any parenthesis the cut left open
+        space = cut.rfind(" ")
+        if space > 40:
+            cut = cut[:space]
+        cut = cut.rstrip() + ("…" if cut.count("(") > cut.count(")") else "")
+    rest = len(text) - len(cut.rstrip("…"))
+    return "%s [+%d chars: sleep.py show %s]" % (cut.rstrip(), rest, cid)
+
+
 def cmd_inject(a) -> int:
     """Print the provisional-memory block for a session's context. Framed as context."""
     pool = [c for c in store.list_candidates(status="provisional", with_body=True)
             if _within_project(c.get("cwd", ""), a.project)]
+    full = bool(getattr(a, "full", False))
     recs = []
     for c in _inject_rank(pool, getattr(a, "query", "") or ""):
         body = c.get("_body", "")
@@ -520,7 +548,16 @@ def cmd_inject(a) -> int:
         # its concrete targets masked so a wrong guess stays unactionable.
         if not (src == "user" and trust == "verified"):
             body, _ = safety.mask_unverified_targets(body)
-        line = safety.render_for_context({"text": body, "source": src, "trust": trust})
+        if full:
+            shown = body
+        else:
+            # Progressive disclosure: the body of a long observation can run past 1000
+            # characters (measured: 11 records = 5581 chars carried in full), and most of
+            # that is narrative a session does not need to act. The index carries what a
+            # session needs to judge relevance - the claim's opening and how to open the
+            # rest - so the full text is one command away instead of always in context.
+            shown = _index_line(body, c.get("id", ""))
+        line = safety.render_for_context({"text": shown, "source": src, "trust": trust})
         age = _age_label(c.get("ts", ""))
         if age:
             line += "  (recorded %s)" % age
@@ -676,6 +713,8 @@ def main(argv=None) -> int:
     ij.add_argument("--query", default="",
                     help="rank provisional records by overlap with this text "
                          "(the live request); newest first when omitted")
+    ij.add_argument("--full", action="store_true",
+                    help="print each record's whole body instead of the index line")
     ij.set_defaults(fn=cmd_inject)
 
     a = ap.parse_args(argv)
