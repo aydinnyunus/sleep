@@ -446,28 +446,137 @@ def hours_since(ts):
     return (datetime.now(dt.tzinfo) - dt).total_seconds() / 3600.0
 
 
-def sleep_gate(records: int, min_records: int, min_interval_hours: float) -> tuple[bool, str]:
+# What a doctor finding is worth as a reason to run NOW. The thresholds above answer
+# "is it time"; these answer "is it needed", and until now nothing consumed them: the
+# pass ran on a flat 6h/3-record policy while `doctor` printed a backlog, stale
+# candidates and an armed-but-never-fired schedule into a report nobody wired to a
+# decision. Each row is (weight, label) and the label travels with the number so a
+# report can never name a weight that did not produce it.
+#
+#   buffer-exceeds-consolidation-window  3  the problem gets worse every hour it waits
+#   stale-candidate-unrediscovered       2  an unconfirmed memory is still being
+#                                           injected as context; leaving it is not
+#                                           neutral, it is a wrong thing kept alive
+#   unused-candidate-never-served        2  a record no session ever saw is a memory
+#                                           that has not paid for itself either way
+#   broken-supersede-link                1  a real defect, but it does not grow
+#   quarantine-awaiting-review           1  needs a person, not a pass; scoring it low
+#                                           keeps a night from running for something a
+#                                           night cannot fix
+#   contradicting-candidates             1  adjudication is a human act; the pass may
+#                                           surface it, but it cannot settle it
+#   near-duplicate-candidates            1
+#   candidate-duplicates-memory          1
+#   stale-value-in-memory                1
+#
+# Everything else (duplicate-heading-in-file and any future issue) weighs 0 on
+# purpose: a new finding must be given a weight deliberately, and an unknown one must
+# never be able to open a gate by accident.
+URGENCY_WEIGHTS = {
+    "buffer-exceeds-consolidation-window": (3, "the backlog grows until a pass runs"),
+    "stale-candidate-unrediscovered": (2, "unconfirmed memory is still served as context"),
+    "unused-candidate-never-served": (2, "a record no session was ever served"),
+    "broken-supersede-link": (1, "a link dangles but does not grow"),
+    "quarantine-awaiting-review": (1, "needs a person, not a pass"),
+    "contradicting-candidates": (1, "the pass can surface it, only a person can settle it"),
+    "near-duplicate-candidates": (1, "hygiene, cheap to leave for the next pass"),
+    "candidate-duplicates-memory": (1, "hygiene, cheap to leave for the next pass"),
+    "stale-value-in-memory": (1, "a stale fact, but the record still holds its subject"),
+}
+
+# The default bar a finding must clear to waive the interval. 2 means "a problem that
+# grows, or a memory that is being served while unconfirmed"; 0 turns the whole
+# mechanism off and restores the flat policy exactly.
+URGENCY_DEFAULT = 2.0
+
+
+def urgency(findings: list) -> tuple[int, str]:
+    """(score, reason) for a doctor report. Read-only, no model call.
+
+    Deliberately a SUM of at most a few points rather than a max: three stale
+    candidates and a growing backlog is a different night from one dangling link, and
+    the number is reported so the difference is inspectable instead of implied. The
+    reason names the largest single contributor, because that is the one a person
+    reading the log would act on first.
+    """
+    total = 0
+    best_w = 0
+    best_issue = ""
+    counts: dict = {}
+    for f in findings or []:
+        issue = str((f or {}).get("issue", ""))
+        w, _label = URGENCY_WEIGHTS.get(issue, (0, ""))
+        if not w:
+            continue
+        total += w
+        counts[issue] = counts.get(issue, 0) + 1
+        # Ties go to the first row in table order, which is also weight order, so the
+        # reason is stable across runs and does not depend on dict iteration order.
+        if w > best_w:
+            best_w, best_issue = w, issue
+    if not total:
+        return 0, ""
+    parts = ", ".join("%s x%d" % (k, v) for k, v in sorted(counts.items()))
+    return total, "%s (+%d; %s)" % (best_issue, total, parts)
+
+
+def sleep_gate(records: int, min_records: int, min_interval_hours: float,
+               urgency_score: int = 0, min_urgency: float = URGENCY_DEFAULT) -> tuple[bool, str]:
+    """Is it time? The record floor always holds; urgency can waive only the interval.
+
+    `urgency_score <= 0` and `min_urgency <= 0` both reproduce the historical behaviour
+    byte for byte, which is what makes this safe to add under callers that do not pass
+    either (a hook, a hand-typed `sleep`, an older script). A waive is reported as
+    such, because "policy satisfied" and "ran early because 4 stale candidates were
+    still being injected" are different facts about the night and a log has to tell
+    them apart.
+    """
     state = paths.read_state()
     last = state.get("last_sleep")
     if records < min_records:
         return False, f"buffer has {records} record(s), needs {min_records}"
     elapsed = hours_since(last)
     if elapsed is not None and elapsed < min_interval_hours:
-            return False, f"last sleep {elapsed:.1f}h ago, minimum interval {min_interval_hours:g}h"
+        if urgency_score > 0 and min_urgency > 0 and urgency_score >= min_urgency:
+            return True, ("ran early: urgency %d >= %g | last sleep %.1fh ago, "
+                          "minimum interval %gh waived"
+                          % (urgency_score, min_urgency, elapsed, min_interval_hours))
+        return False, f"last sleep {elapsed:.1f}h ago, minimum interval {min_interval_hours:g}h"
     return True, "policy satisfied"
 
 
 def run_sleep(session=None, model=None, budget_usd=1.0, min_records=3,
-              min_interval_hours=6.0, force=False, dry_run=False):
+              min_interval_hours=6.0, force=False, dry_run=False,
+              findings=None, min_urgency=URGENCY_DEFAULT):
     """The entry point a hook or a cron job calls. Cheap when there is nothing
-    to consolidate: one stat and one JSON read, no model call."""
+    to consolidate: one stat, one JSON read and a read-only hygiene scan, no model call.
+
+    `findings` is a caller-supplied `store.doctor()` report, and passing one is the
+    point of the argument: `nightly` already computes it for its own report, and
+    reading candidate frontmatter twice in one night would be waste dressed as
+    thoroughness. When it is None and `min_urgency` is on, the scan runs here, which
+    costs file reads and no API call (only `doctor --contradictions` spends, and that
+    is not on this path).
+    """
     records = store.buffer_counts()["records"]
-    ok, reason = sleep_gate(records, min_records, min_interval_hours)
+    score = 0
+    detail = ""
+    if min_urgency and min_urgency > 0:
+        if findings is None:
+            findings = store.doctor()
+        score, detail = urgency(findings)
+    ok, reason = sleep_gate(records, min_records, min_interval_hours,
+                            urgency_score=score, min_urgency=min_urgency)
+    gate = {"min_records": min_records, "min_interval_hours": min_interval_hours,
+            "min_urgency": min_urgency, "urgency": score}
+    if detail:
+        gate["urgency_detail"] = detail
     if not ok and not force:
-        return {"action": "skipped", "reason": reason, "buffer_records": records}
+        return {"action": "skipped", "reason": reason, "buffer_records": records,
+                "gate": gate}
     if dry_run:
         return {"action": "would-run", "reason": reason if ok else reason + " (forced)",
-                "buffer_records": records}
+                "buffer_records": records, "gate": gate}
     if not acquire_lock():
         return {"action": "locked", "reason": "another consolidation is running",
                 "buffer_records": records}
@@ -478,7 +587,7 @@ def run_sleep(session=None, model=None, budget_usd=1.0, min_records=3,
         state["sleep_count"] = int(state.get("sleep_count", 0)) + 1
         state["last_sleep_result"] = {k: result.get(k) for k in
                                       ("proposals", "accepted", "refused", "llm_exit",
-                                       "buffer_records", "outside_window")}
+                                       "buffer_records", "outside_window", "gate")}
         paths.write_state(state)
         # Synaptic pruning only after a consolidation that actually produced
         # proposals. Pruning a buffer the model never read would silently discard

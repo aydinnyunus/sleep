@@ -833,6 +833,83 @@ class T(unittest.TestCase):
         self.assertFalse(os.path.exists(os.path.join(TMP, ".sleep.lock")),
                          "a skipped run must not leave a lock behind")
 
+    def test_urgency_weights_come_from_the_table_and_name_it(self):
+        score, detail = consolidate.urgency([])
+        self.assertEqual((score, detail), (0, ""))
+        # an unknown issue cannot open a gate by accident, and weighs nothing
+        self.assertEqual(consolidate.urgency([{"issue": "something-new"}])[0], 0)
+        # the label in the detail is derived from the table, never written twice
+        rows = [{"issue": "buffer-exceeds-consolidation-window"},
+                {"issue": "stale-candidate-unrediscovered"},
+                {"issue": "stale-candidate-unrediscovered"}]
+        score, detail = consolidate.urgency(rows)
+        want = sum(consolidate.URGENCY_WEIGHTS[r["issue"]][0] for r in rows)
+        self.assertEqual(score, want, detail)
+        self.assertIn("buffer-exceeds-consolidation-window x1", detail)
+        self.assertIn("stale-candidate-unrediscovered x2", detail)
+        self.assertIn("+%d" % want, detail)
+
+    def test_every_weight_the_doctor_can_emit_is_a_known_row(self):
+        # Guards the table against a finding added later that nobody weighed: such a
+        # finding weighs 0, which is safe but silent, so the test names the set that
+        # was decided on rather than letting the table drift.
+        known = set(consolidate.URGENCY_WEIGHTS)
+        self.assertIn("buffer-exceeds-consolidation-window", known)
+        self.assertIn("stale-candidate-unrediscovered", known)
+        self.assertIn("unused-candidate-never-served", known)
+        self.assertNotIn("duplicate-heading-in-file", known,
+                         "a heading smell must not be able to open a gate")
+
+    def test_urgency_waives_the_interval_but_never_the_record_floor(self):
+        st = paths.read_state()
+        st["last_sleep"] = paths.now()
+        paths.write_state(st)
+        # the flat policy refuses a second pass straight away
+        ok, reason = consolidate.sleep_gate(50, 3, 6.0)
+        self.assertFalse(ok, reason)
+        self.assertIn("minimum interval 6h", reason)
+        # a scored finding waives only the interval, and says so
+        ok, reason = consolidate.sleep_gate(50, 3, 6.0, urgency_score=3)
+        self.assertTrue(ok, reason)
+        self.assertIn("ran early", reason)
+        self.assertIn("waived", reason)
+        self.assertIn("urgency 3", reason)
+        # below the bar: still flat
+        self.assertFalse(consolidate.sleep_gate(50, 3, 6.0, urgency_score=1)[0])
+        self.assertFalse(consolidate.sleep_gate(50, 3, 6.0, urgency_score=3,
+                                                min_urgency=0)[0],
+                         "min_urgency=0 turns the mechanism off")
+        # the record floor is not waivable, however urgent
+        ok, reason = consolidate.sleep_gate(2, 3, 6.0, urgency_score=99)
+        self.assertFalse(ok, reason)
+        self.assertIn("needs 3", reason)
+
+    def test_run_sleep_reports_why_it_ran_early(self):
+        st = paths.read_state()
+        st["last_sleep"] = paths.now()
+        paths.write_state(st)
+        with open(os.path.join(paths.buffer_dir(), "gate-s.jsonl"), "w") as fh:
+            for i in range(130):
+                fh.write(json.dumps({"id": "g%03d" % i, "ts": paths.now(),
+                                     "session": "gate-s", "cwd": "/tmp/p",
+                                     "text": "bulk %d" % i, "kind": "fact",
+                                     "source": "agent", "tags": []}) + "\n")
+        # findings passed in, so the scan is not re-run: this is what nightly does
+        findings = [{"issue": "buffer-exceeds-consolidation-window", "session": "gate-s",
+                     "buffer_records": 130, "window": 120, "outside_window": 10}]
+        rep = consolidate.run_sleep(dry_run=True, findings=findings)
+        self.assertEqual(rep["action"], "would-run", rep)
+        self.assertEqual(rep["gate"]["urgency"], 3, rep["gate"])
+        self.assertIn("waived", rep["reason"])
+        self.assertIn("buffer-exceeds-consolidation-window",
+                      rep["gate"]["urgency_detail"])
+        # the same night under the old policy is skipped, which is the behaviour the
+        # mechanism has to be able to explain
+        rep = consolidate.run_sleep(dry_run=True, findings=findings, min_urgency=0)
+        self.assertEqual(rep["action"], "skipped", rep)
+        self.assertEqual(rep["gate"]["urgency"], 0, rep["gate"])
+        os.remove(os.path.join(paths.buffer_dir(), "gate-s.jsonl"))
+
 
     def test_replay_answer_text_reads_the_answer_not_the_envelope(self):
         from sleepkit import replay as rp

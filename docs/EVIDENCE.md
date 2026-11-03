@@ -583,3 +583,56 @@ preference promotable, agent fact and warning promotable, speculative source sti
 per-session `buffer-exceeds-consolidation-window` finding
 (`test_many_small_sessions_are_not_one_large_buffer`: six 20-record sessions are six complete
 passes, not one 120-record buffer, and the doctor says nothing).
+
+
+## 2026-11-03: the hygiene report feeds the gate instead of sitting beside it
+
+Section 6 of `docs/TMP-sleep-framework-gaps.md` named the gap: "zamanlama sabit eşikler ...
+`doctor`'ın bulguları rapor, tetikleyici değil". That was exact. `doctor` computed a backlog past
+the read window, stale candidates that no longer earn their place, and an armed-and-never-fired
+schedule; `sleep_gate` then asked only "3 records and 6 hours since the last pass". The report and
+the decision lived in the same process and never spoke.
+
+`consolidate.URGENCY_WEIGHTS` puts a value on each finding a doctor can emit - a growing backlog 3,
+a stale candidate or an unserved record 2, a dangling link or a quarantine 1 - and
+`consolidate.urgency(findings)` sums them into a score with a reason that names the largest
+contributor and the counts. Everything not in the table weighs 0, so a finding added later cannot
+open a gate by accident; that is deliberate, not an oversight.
+
+`sleep_gate` takes `urgency_score` and `min_urgency`. A score at or above the bar waives the
+interval check ONLY: the record floor is never waived, because "enough happened to be worth
+reading" is a different question from "a problem is waiting". Both defaults reproduce the old
+behaviour byte for byte (`urgency_score=0` and `min_urgency=0` each do it independently), which is
+what makes this safe to land under a hook or a cron entry that passes neither.
+
+Measured on a clean `SLEEP_HOME`, 130 buffered records and one 200-day-old preference, with
+`last_sleep` set to now so the interval blocks a second pass:
+
+- `sleep --dry-run` -> `would-run`, `urgency 7`, reason `ran early: urgency 7 >= 2 | last sleep 0.0h
+  ago, minimum interval 6h waived`
+- `sleep --dry-run --no-doctor-gate` -> `skipped`, `urgency 0`, reason `last sleep 0.0h ago, minimum
+  interval 6h`
+- `nightly --dry-run --no-mine` -> the doctor report and the sleep gate carry the SAME three issues
+  (`stale-candidate-unrediscovered`, `unused-candidate-never-served`,
+  `buffer-exceeds-consolidation-window`); the gate is handed the report the night already computed
+  rather than reading candidate frontmatter a second time.
+
+Cost: `burst` is unchanged. Scoring calls `store.doctor()` with no needle, which reads candidate
+frontmatter and the T0 counts and makes no model call; only `doctor --contradictions` spends, and
+that is not on this path. `nightly` reuses its own report, so the unattended night reads once.
+
+Deliberately not done, so the edges are not mistaken for coverage:
+
+- No decay, no deletion, no demotion. The score decides WHEN a pass runs, never what a record is
+  worth. Dropping records is still a human act, and `prune` is still the explicit clear-out.
+- The record floor is not waivable. A buffer with two records and a month of backlog waits.
+- `replay` keeps its own clock (`--replay-interval`): what replay measures is whether a memory
+  helps, and a hygiene finding says nothing about that.
+- One finding still weighs more than a person's time than it should: `quarantine-awaiting-review`
+  is scored 1 because a night cannot resolve a quarantine, so a quarantine alone will not wake a
+  pass. A person who wants it to can pass `--min-urgency 1`.
+
+Pinned by `tests/test_core.py::T` (`test_urgency_weights_come_from_the_table_and_name_it`,
+`test_every_weight_the_doctor_can_emit_is_a_known_row`,
+`test_urgency_waives_the_interval_but_never_the_record_floor`,
+`test_run_sleep_reports_why_it_ran_early`).

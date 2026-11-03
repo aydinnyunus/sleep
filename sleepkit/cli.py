@@ -46,7 +46,8 @@ def cmd_sleep(a) -> int:
     rep = consolidate.run_sleep(session=a.session, model=a.model, budget_usd=a.budget,
                                 min_records=a.min_records,
                                 min_interval_hours=a.min_interval,
-                                force=a.force, dry_run=a.dry_run)
+                                force=a.force, dry_run=a.dry_run,
+                                min_urgency=0 if a.no_doctor_gate else a.min_urgency)
     _p(json.dumps(rep, indent=2, sort_keys=True, default=str))
     if rep.get("action") == "ran":
         return 0 if rep.get("ok") is not False else 3
@@ -457,12 +458,18 @@ def cmd_nightly(a) -> int:
     # The hygiene report lands in the night regardless of the gates: it is
     # read-only, so the worst an unattended pass can do is surface a stale
     # value (e.g. a changed deployment URL) for a person to act on later.
-    rep["doctor"] = {"issues": store.doctor(needle=a.stale)}
+    issues = store.doctor(needle=a.stale)
+    rep["doctor"] = {"issues": issues}
+    # The hygiene report is handed to the gate rather than recomputed: same read, one
+    # night, and it is what lets a finding move the pass off the flat interval. With
+    # --no-doctor-gate the gate gets the old policy and the report is unaffected.
     rep["sleep"] = consolidate.run_sleep(session=a.session, model=a.model,
                                          budget_usd=a.budget,
                                          min_records=a.min_records,
                                          min_interval_hours=a.min_interval,
-                                         force=a.force, dry_run=a.dry_run)
+                                         force=a.force, dry_run=a.dry_run,
+                                         findings=issues,
+                                         min_urgency=0 if a.no_doctor_gate else a.min_urgency)
     rep["replay"] = replay_mod.nightly(tasks_path=a.replay_tasks, model=a.model,
                                        budget=a.replay_budget,
                                        limit=a.replay_limit,
@@ -672,6 +679,12 @@ def main(argv=None) -> int:
     sl.add_argument("--min-records", type=int, default=3, dest="min_records")
     sl.add_argument("--min-interval", type=float, default=6.0, dest="min_interval",
                     help="hours between sleeps")
+    sl.add_argument("--min-urgency", type=float, default=consolidate.URGENCY_DEFAULT,
+                    dest="min_urgency",
+                    help="doctor findings worth at least this many points skip the "
+                         "interval check (0 = flat policy, no hygiene scan)")
+    sl.add_argument("--no-doctor-gate", action="store_true", dest="no_doctor_gate",
+                    help="do not score the hygiene report; the interval is never waived")
     sl.add_argument("--force", action="store_true")
     sl.add_argument("--dry-run", action="store_true")
     sl.set_defaults(fn=cmd_sleep)
@@ -748,6 +761,12 @@ def main(argv=None) -> int:
     nt.add_argument("--min-records", type=int, default=3, dest="min_records")
     nt.add_argument("--min-interval", type=float, default=6.0, dest="min_interval",
                     help="hours between consolidations")
+    nt.add_argument("--min-urgency", type=float, default=consolidate.URGENCY_DEFAULT,
+                    dest="min_urgency",
+                    help="hygiene findings worth at least this many points skip the "
+                         "interval check (0 = flat policy)")
+    nt.add_argument("--no-doctor-gate", action="store_true", dest="no_doctor_gate",
+                    help="score the hygiene report but never waive the interval")
     nt.add_argument("--force", action="store_true")
     nt.add_argument("--dry-run", action="store_true")
     nt.add_argument("--replay-interval", type=float, default=168.0, dest="replay_interval",

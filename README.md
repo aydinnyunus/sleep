@@ -35,6 +35,13 @@ Sleep adds a reviewable memory cycle to nine selectable coding-agent targets. It
   procedures, environment warnings) instead of moving them out of reach with the file, so
   what leaves T0 is what a pass could have read. The count is printed instead of being
   inferred from the proposal count.
+- **A pass that reads its own report.** `doctor` findings are not decoration: `sleep` and
+  `nightly` score them, and a problem that gets worse while it waits (a backlog past the read
+  window, an unconfirmed memory still being served as context) waives the `--min-interval` check
+  so the pass runs now instead of on the clock. The record floor always holds, the reason in the
+  report names the interval as waived and the score that waived it, and `--min-urgency 0` (or
+  `--no-doctor-gate`) restores the flat policy exactly. Scoring reads the hygiene report only;
+  it makes no model call, so the unattended path spends nothing new.
 - **Review before permanence.** New memories stay provisional until you promote or refuse them.
 - **Nightly dream cycle.** Mine repeated preferences, consolidate recent observations, and measure memory effects while you are away.
 - **Measured replay.** Run the same task with memory off and on before deciding whether a memory helps. Each completed pass leaves a one-line quality summary (`helps / hurts / ties`) in `status` and in the nightly report, so the question stays answerable between passes; a pass whose two arms ran the same prompt says it measured nothing instead of reporting zeros.
@@ -362,6 +369,7 @@ Run the two dream components separately when you want more control:
 | `./sleep.py status -v` | ... and the last measured memory quality (`3 helps / 1 hurts / 4 ties from 8 samples`, or "no replay measurement has run yet") |
 | `./sleep.py mine --dry-run` | Find preferences repeated across sessions |
 | `./sleep.py nightly --dry-run` | Preview the unattended nightly workflow |
+| `./sleep.py sleep --min-urgency <points>` | Score the hygiene findings and let them waive `--min-interval` (default 2: a growing backlog or a stale candidate clears it, a dangling link does not). `--min-urgency 0` or `--no-doctor-gate` keeps the flat policy, and the record floor (`--min-records`) is never waived |
 | `./sleep.py doctor` | Find duplicate or overlapping memory records, flag contradicting candidates (same subject, one side carries a correction marker) and print the `supersede <older> <newer>` command to run, flag provisional candidates unrediscovered past their kind's threshold (4 weeks for a fact, 13 for a preference, 8 for a procedure, 52 for a warning; kind and threshold appear in the finding), flag records no session was ever served past their kind's unused threshold (8 / 26 / 12 / 52), flag supersede pointers that name a record no longer in the store, report a T0 buffer larger
 than the 120-record consolidation window (with the count left outside it), and report records
 parked in quarantine awaiting a human (report only: it never supersedes, drops, merges or un-parks anything itself) |
