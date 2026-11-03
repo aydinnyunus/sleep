@@ -140,7 +140,7 @@ Use `--agents oh-my-pi` for Oh My Pi. `--extension` remains an alias for selecti
 
 The extension loads on the next Pi or OmO session and performs three jobs:
 
-- captures user messages and relevant tool activity into T0,
+- captures user messages and relevant tool activity into T0, recording which tool ran and whether it succeeded,
 - injects matching T1 provisional memory into the agent context,
 - wakes the sleep policy after the agent settles.
 
@@ -382,6 +382,11 @@ Sleep separates memory into three tiers:
 | Tier | Meaning | Who writes it |
 |---|---|---|
 | T0 | Temporary session observations | Hooks, extension, or `capture` |
+
+A tool event records the tool and its outcome (`Bash failed`, `Edit ok`) on the
+record's `evidence` line, so a "fact" that came out of a failed command is
+visible as such in review. A call with no file path keeps the tool and outcome
+too (and claims no path it does not have).
 | T1 | Provisional memory shown as unverified background | Consolidation and `mine` |
 | T2 | Permanent memory | Only an explicit `promote` command |
 
