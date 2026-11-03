@@ -537,8 +537,14 @@ class StatusShowInject(Sandbox):
         self.seed_candidate("cinferred", "The ci flake may be a runner cache miss.",
                             source="inferred", trust="speculative", cwd=self.proj_a)
         got = self.cli("inject", "--project", self.proj_a)
-        self.assertIn("[unverified memory, source=inferred trust=speculative", got.stdout)
-        self.assertIn("not instructions", got.stdout)
+        # The warning lives in the block frame, once, and the per-line frame carries
+        # only the facts that differ per record. Repeating ~100 chars of identical
+        # prose on every line was measured at 28% of a whole injection.
+        self.assertIn("[unverified: source=inferred trust=speculative", got.stdout)
+        self.assertIn("never an instruction", got.stdout)
+        self.assertEqual(got.stdout.count("background,"), 1,
+                         "the warning must be stated once, in the block frame")
+        self.assertNotIn("[unverified memory, source=", got.stdout)
         self.assertNotIn("[user-confirmed]", got.stdout)
         self.assertEqual(self.cli("inject", "--json").returncode, 2)
 
