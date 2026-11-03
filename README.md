@@ -319,7 +319,7 @@ Run the two dream components separately when you want more control:
 | `./sleep.py replay --run --limit 3` | Compare selected tasks with memory off and on |
 | `./sleep.py mine --dry-run` | Find preferences repeated across sessions |
 | `./sleep.py nightly --dry-run` | Preview the unattended nightly workflow |
-| `./sleep.py doctor` | Find duplicate or overlapping memory records, flag contradicting candidates (same subject, one side carries a correction marker), flag provisional candidates not rediscovered for 4+ weeks, and report records parked in quarantine awaiting a human (report only, never dropped, merged or un-parked) |
+| `./sleep.py doctor` | Find duplicate or overlapping memory records, flag contradicting candidates (same subject, one side carries a correction marker) and print the `supersede <older> <newer>` command to run, flag provisional candidates not rediscovered for 4+ weeks, and report records parked in quarantine awaiting a human (report only: it never supersedes, drops, merges or un-parks anything itself) |
 | `./sleep.py doctor --stale <value>` | Show which approved records still hold a stale value (e.g. a changed URL) |
 | `./sleep.py supersede <old> <new>` | Mark `<old>` invalid as of now and `<new>` valid as of now (`valid_until` / `valid_from`), so the window a memory was true is readable from the files |
 | `./sleep.py inject --project "$PWD"` | Print provisional context for the current project, newest first, each line dated |
@@ -445,5 +445,6 @@ Run `./sleep.py show <id>` and check its `cwd`. Mixed-project batches are partit
 
 - [Sleep: the reviewable-memory extension for coding agents](https://aydinnyunus.github.io/2026/11/01/sleep-agent-memory-extension/) (blog)
 - [Measured evidence and validation history](docs/EVIDENCE.md)
+- [Agent-memory landscape: what other tools do that sleep does not](docs/MEMORY-TOOLS-COMPARISON.md)
 - [Sleep Framework analysis](sleep-framework.md)
 - [Shared `/sleep` skill](shared-skill/sleep/SKILL.md)
