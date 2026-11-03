@@ -11,6 +11,7 @@ Policy (the part that keeps this from becoming a self-poisoning loop):
 """
 from __future__ import annotations
 
+import itertools
 import json
 import os
 import re
@@ -598,6 +599,32 @@ def prune_buffer(older_than_hours: float = 0.0, session: str | None = None) -> d
         shutil.move(p, dest)
         moved.append(dest)
     return {"moved": moved, "remaining": buffer_counts()}
+
+
+# A cheap pre-filter for the LLM adjudicator. Token Jaccard is a poor *decider* on
+# short observations (measured: no real pair in a live 11-record pool cleared 0.5),
+# but it is a fine *shortlist*: pairs that share at least a handful of content words
+# are the only ones worth spending a model call on. The model decides; this decides
+# what the model is asked about, so the cost stays bounded by the record count.
+CONTRADICTION_SHORTLIST = 0.05
+CONTRADICTION_MAX_PAIRS = 12
+
+
+def candidate_pairs(recs: list, limit: int = CONTRADICTION_MAX_PAIRS) -> list:
+    """Pairs of provisional records worth asking a model about, newest-signal first.
+
+    recs: [(id, body, ts)] in any order. Returns [(older_id, newer_id, ts_map)] with
+    at most `limit` pairs, ordered by shared-wording score so a bounded number of
+    model calls covers the most likely conflicts first.
+    """
+    scored = []
+    for (ia, ba, ta), (ib, bb, tb) in itertools.combinations(recs, 2):
+        s = similarity(ba, bb)
+        if s >= CONTRADICTION_SHORTLIST:
+            older, newer = (ia, ib) if (ta or "") <= (tb or "") else (ib, ia)
+            scored.append((s, older, newer))
+    scored.sort(reverse=True)
+    return [(o, n) for _s, o, n in scored[:limit]]
 
 
 def _older_newer(a: str, b: str, ts_by_id: dict) -> tuple[str, str]:

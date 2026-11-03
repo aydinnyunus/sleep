@@ -25,6 +25,7 @@ Run: python3 tests/test_cli.py
 """
 import glob
 import hashlib
+import importlib
 import json
 import os
 import re
@@ -133,7 +134,7 @@ class Sandbox(unittest.TestCase):
 
     def env(self, **overrides):
         env = dict(os.environ)
-        for leaked in ("SLEEP_DISABLE", "SLEEP_SYNC", "SLEEPCTL", "SLEEP_MIN_RECORDS",
+        for leaked in ("SLEEP_LLM_TRANSPORT", "SLEEP_DISABLE", "SLEEP_SYNC", "SLEEPCTL", "SLEEP_MIN_RECORDS",
                        "SLEEP_MIN_INTERVAL", "SLEEP_MODEL", "SLEEP_SESSION",
                        "SLEEP_MEMORY_DIR", "SLEEP_HOME", "SLEEP_TEST_MODEL_MARKER",
                        "CLAUDE_HOME", "OMO_HOME", "CLAUDE_CONFIG_DIR", "CLAUDE_BIN",
@@ -149,6 +150,10 @@ class Sandbox(unittest.TestCase):
             "CLAUDE_CONFIG_DIR": self.claude_home,
             "SLEEP_MEMORY_DIR": self.memory,
             "CLAUDE_BIN": os.path.join(self.bin, "absent-claude"),
+            # Pin the transport: the sandbox fakes the agent CLI, and auto-detection
+            # would otherwise find the real omo binary on the developer's machine and
+            # call it live from inside a test.
+            "SLEEP_LLM_TRANSPORT": os.environ.get("SLEEP_TEST_TRANSPORT", "claude"),
             "SLEEP_TEST_MODEL_MARKER": self.marker,
             "PATH": os.pathsep.join([self.bin, os.path.dirname(PY), "/bin", "/usr/bin"]),
         })
@@ -824,6 +829,108 @@ class ProvenanceCeiling(Sandbox):
         self.assertNotIn("[user-confirmed]", injected.stdout)
 
 
+class TransportSelection(unittest.TestCase):
+    """The headless boundary picks a transport by what exists on the machine.
+
+    These assert the *decision*, not the call: eligibility is a fact about the host
+    (an omo binary, a claude binary, an env file naming an endpoint and a token), and
+    an operator who pins one must hear that it is unusable rather than get a silent
+    fallback.
+    """
+
+    def setUp(self):
+        sys.path.insert(0, os.path.join(REPO, "tools"))
+        self.llm = importlib.import_module("sleepkit.llm")
+        self._saved = {k: os.environ.get(k) for k in
+                       ("SLEEP_LLM_TRANSPORT", "SLEEP_HOME", "ANTHROPIC_BASE_URL",
+                        "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_MODEL", "SLEEP_MODEL", "CLAUDE_BIN")}
+        for k in self._saved:
+            os.environ.pop(k, None)
+
+    def tearDown(self):
+        for k, v in self._saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+    def _env_file(self, text):
+        tmp = tempfile.mkdtemp(prefix="envfile-")
+        path = os.path.join(tmp, "env")
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(text)
+        os.environ["SLEEP_HOME"] = tmp
+        return path
+
+    def test_an_explicit_transport_wins_and_an_unknown_one_is_refused(self):
+        os.environ["SLEEP_LLM_TRANSPORT"] = "http"
+        self.assertEqual(self.llm.resolve_transport(), "http")
+        os.environ["SLEEP_LLM_TRANSPORT"] = "telepathy"
+        with self.assertRaises(ValueError):
+            self.llm.resolve_transport()
+
+    def test_omo_wins_over_claude_when_both_binaries_exist(self):
+        """Priority: omo first. It is the host's own headless mode and it is the one
+        that keeps working when a nested claude is refused."""
+        fake = tempfile.mkdtemp(prefix="bin-")
+        omo = os.path.join(fake, "omo")
+        with open(omo, "w") as fh:
+            fh.write("#!/bin/sh\n")
+        os.chmod(omo, 0o755)
+        self.llm._omo_binary.cache_clear() if hasattr(self.llm._omo_binary, "cache_clear") else None
+        old = self.llm._omo_binary
+        self.llm._omo_binary = lambda: omo
+        try:
+            self.assertEqual(self.llm.resolve_transport(), "omo")
+        finally:
+            self.llm._omo_binary = old
+
+    def test_http_is_eligible_only_with_both_a_url_and_a_token(self):
+        """A URL without a token cannot be used, and neither can a token without a URL.
+
+        The gate is read from the process environment here rather than from an env file,
+        because paths.env_file() resolves against the SLEEP_HOME captured at import time:
+        a file written inside the test would not be the file the code reads, and the real
+        ~/.sleep/env would leak in and make this pass or fail for the wrong reason.
+        """
+        old = self.llm._omo_binary
+        old_over = self.llm.env_overrides
+        self.llm._omo_binary = lambda: None
+        # Neutralize the developer's ~/.sleep/env: it names a real token, and the point of
+        # this test is the gate itself, not whatever this machine happens to have.
+        self.llm.env_overrides = lambda path: {}
+        try:
+            os.environ["ANTHROPIC_BASE_URL"] = "https://example.invalid/piper/genai/"
+            os.environ.pop("ANTHROPIC_AUTH_TOKEN", None)
+            self.assertIsNone(self.llm._http_config(), "a URL without a token is not usable")
+            os.environ.pop("ANTHROPIC_BASE_URL", None)
+            os.environ["ANTHROPIC_AUTH_TOKEN"] = "abc"
+            self.assertIsNone(self.llm._http_config(), "a token without a URL is not usable")
+            os.environ["ANTHROPIC_BASE_URL"] = "https://example.invalid/piper/genai/"
+            cfg = self.llm._http_config()
+            self.assertIsNotNone(cfg)
+            self.assertEqual(cfg["base_url"], "https://example.invalid/piper/genai")
+            self.assertEqual(cfg["token"], "abc")
+        finally:
+            self.llm._omo_binary = old
+            self.llm.env_overrides = old_over
+            os.environ.pop("ANTHROPIC_BASE_URL", None)
+            os.environ.pop("ANTHROPIC_AUTH_TOKEN", None)
+
+    def test_omo_is_never_handed_the_gateways_model_name(self):
+        """measured: omo exits 1 with no output when given ANTHROPIC_MODEL's name.
+
+        Only an explicit choice (the argument) or SLEEP_MODEL reaches omo; the gateway
+        variable stays the claude/http vocabulary.
+        """
+        os.environ["ANTHROPIC_MODEL"] = "deepseek/deepseek-v4.1-flash"
+        os.environ.pop("SLEEP_MODEL", None)
+        self.assertIsNone(self.llm.omo_model(None))
+        self.assertEqual(self.llm.omo_model("chosen/model"), "chosen/model")
+        os.environ["SLEEP_MODEL"] = "operator/pick"
+        self.assertEqual(self.llm.omo_model(None), "operator/pick")
+
+
 class Doctor(Sandbox):
     """doctor: the read-only hygiene report, on a clean and a deliberately dirty tree."""
 
@@ -928,6 +1035,47 @@ class Doctor(Sandbox):
             body = self.read(os.path.join(self.sleep_home, "candidates", cid + ".md"))
             self.assertIn("status: provisional", body)
             self.assertNotIn("valid_until:", body.split("---")[1])
+
+    def test_doctor_contradictions_calls_the_model_and_reports_its_verdict(self):
+        """The adjudication path end to end with a fake model: the shortlisted pair is
+        sent, the model's JSON verdict becomes a report line, and nothing is superseded."""
+        self.seed_candidate("cA", "The staging host is mars-staging.internal for deploys.",
+                            cwd=self.proj_a, ts="2026-10-01T10:00:00+0300")
+        self.seed_candidate("cB", "The staging host is now venus-staging.internal for deploys.",
+                            cwd=self.proj_a, ts="2026-10-20T10:00:00+0300")
+        fake = os.path.join(self.bin, "fake-claude-contra")
+        self.write(fake, FAKE_CLAUDE_CONTRADICTIONS)
+        os.chmod(fake, 0o755)
+        got = self.cli("doctor", "--contradictions", "--budget", "0.30", CLAUDE_BIN=fake)
+        self.assertEqual(got.returncode, 0, got.stdout + got.stderr)
+        self.assertIn("contradicting-candidates (1)", got.stdout)
+        self.assertIn("cA", got.stdout)
+        issues = json.loads(self.cli("doctor", "--contradictions", "--json", "--budget", "0.30",
+                                     CLAUDE_BIN=fake).stdout)
+        hit = [i for i in issues if i["issue"] == "contradicting-candidates"]
+        self.assertEqual(len(hit), 1, issues)
+        self.assertEqual(hit[0]["source"], "model")
+        self.assertEqual(hit[0]["older"], "cA", "the older record is the claim, the newer the correction")
+        self.assertEqual(hit[0]["newer"], "cB")
+        self.assertEqual(hit[0]["suggest"], "sleep.py supersede cA cB")
+        # report-only: both records keep their status
+        for cid in ("cA", "cB"):
+            text = self.read(os.path.join(self.sleep_home, "candidates", cid + ".md"))
+            self.assertIn("status: provisional", text,
+                          "%s must keep its status; the report never supersedes" % cid)
+
+    def test_doctor_contradictions_survives_a_model_that_returns_nothing(self):
+        """A dead or silent model must not take down the rest of the scan."""
+        self.seed_candidate("cA", "The staging host is mars-staging.internal.", cwd=self.proj_a,
+                            ts="2026-10-01T10:00:00+0300")
+        self.seed_candidate("cB", "The staging host is venus-staging.internal now.", cwd=self.proj_a,
+                            ts="2026-10-20T10:00:00+0300")
+        broken = os.path.join(self.bin, "fake-claude-silent")
+        self.write(broken, "#!/bin/sh\nexit 0\n")
+        os.chmod(broken, 0o755)
+        got = self.cli("doctor", "--contradictions", CLAUDE_BIN=broken)
+        self.assertEqual(got.returncode, 0, got.stdout + got.stderr)
+        self.assertNotIn("contradicting-candidates", got.stdout)
 
     def test_doctor_does_not_flag_a_malformed_buffer_line(self):
         """The report is about memory hygiene, not buffer parsing: pinned so nobody
@@ -1661,6 +1809,21 @@ class InstallUninstall(Sandbox):
         again = self.uninstall()
         self.assertEqual(again.returncode, 0, again.stderr[-1500:])
         self.assertEqual(digest(self.settings_path), after, "uninstall must be idempotent")
+
+
+FAKE_CLAUDE_CONTRADICTIONS = """#!/usr/bin/env python3
+# Stand-in for `claude --output-format json` during a doctor --contradictions run:
+# prints the turn array the real CLI prints, with an adjudicated pair as the result.
+import json
+import sys
+
+payload = sys.stdin.read()
+# only the pair that the shortlist actually sent is adjudicated
+result = {"pairs": [{"pair": 1, "contradiction": True, "older": "cA", "newer": "cB",
+                     "reason": "the host changed"}]}
+print(json.dumps([{"type": "system", "subtype": "init"},
+                  {"type": "result", "subtype": "success", "result": json.dumps(result)}]))
+"""
 
 
 FAKE_CLAUDE = """#!/usr/bin/env python3

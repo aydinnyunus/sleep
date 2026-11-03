@@ -190,8 +190,90 @@ def cmd_prune(a) -> int:
     return 0
 
 
+def _doctor_shortlist() -> list:
+    """(id, body, ts) for every provisional record, the input to candidate_pairs."""
+    out = []
+    for c in store.list_candidates(status="provisional", with_body=True):
+        out.append((c["id"], c.get("_body", "") or "", str(c.get("ts", ""))))
+    return out
+
+
+def _llm_contradictions(pairs: list, budget: float, model: str | None) -> list:
+    """Ask the model to adjudicate shortlisted pairs. Report-only: returns findings,
+    changes nothing. A failed or unparseable call yields [] so doctor still reports the
+    rest of its scan instead of dying on a model problem."""
+    if not pairs:
+        return []
+    # get_candidate returns (meta, body): the text lives in the SECOND element, never
+    # under meta["_body"] (that key only exists on the list_candidates path). Reading the
+    # wrong one sent the model three pairs of empty bodies, and it answered, correctly,
+    # that there was nothing to compare - a silently useless call, not a crash.
+    seen = {}
+    for cid in {c for pair in pairs for c in pair}:
+        got = store.get_candidate(cid)
+        seen[cid] = (got[0], got[1]) if got else ({}, "")
+    lines = []
+    for i, (older, newer) in enumerate(pairs, 1):
+        lines.append("Pair %d:" % i)
+        for cid in (older, newer):
+            meta, body = seen.get(cid, ({}, ""))
+            lines.append("  id=%s ts=%s body=%s" % (cid, meta.get("ts", "?"),
+                                                   (body or "").replace("\n", " ").strip()))
+    user = ("Unreviewed provisional memory records, grouped into candidate pairs.\n"
+            "Adjudicate each pair per your instructions.\n\n" + "\n".join(lines))
+    pf = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "prompts",
+                      "contradiction-check.md")
+    # The subprocess seam: tests replace llm.run with a fake so the adjudication path is
+    # exercisable with no model, no network and no budget (the real binary refuses to run
+    # nested inside another agent, which makes an in-session live call impossible).
+    res = llm.run(system_prompt_file=os.path.abspath(pf), user_prompt=user,
+                  add_dirs=[], allowed_tools=llm.READONLY_TOOLS, model=model,
+                  budget_usd=budget, output_format="json")
+    # The CLI's json output has shipped both as one object and as an array of turn
+    # objects (see llm.parse_json_output), and the model's answer is a JSON string it
+    # was asked to print. Accept every one of those shapes instead of assuming a dict.
+    raw = res.get("json")
+    if isinstance(raw, list):
+        for item in reversed(raw):
+            if isinstance(item, dict) and isinstance(item.get("result"), str):
+                raw = item
+                break
+    text = ""
+    if isinstance(raw, dict):
+        text = raw.get("result") or raw.get("text") or ""
+    if not isinstance(text, str) or not text.strip():
+        text = res.get("stdout") or ""
+    doc = None
+    for chunk in (text, res.get("stdout") or ""):
+        if not isinstance(chunk, str) or "{" not in chunk or "}" not in chunk:
+            continue
+        try:
+            doc = json.loads(chunk[chunk.index("{"):chunk.rindex("}") + 1])
+            break
+        except Exception:
+            doc = None
+    if not isinstance(doc, dict):
+        return []
+    found = []
+    for item in doc.get("pairs") or []:
+        if not isinstance(item, dict) or not item.get("contradiction"):
+            continue
+        try:
+            older, newer = pairs[int(item["pair"]) - 1]
+        except (KeyError, IndexError, ValueError, TypeError):
+            continue
+        found.append({"issue": "contradicting-candidates",
+                      "pair": [older, newer], "older": older, "newer": newer,
+                      "source": "model", "reason": str(item.get("reason", ""))[:200],
+                      "suggest": "sleep.py supersede %s %s" % (older, newer)})
+    return found
+
+
 def cmd_doctor(a) -> int:
     issues = store.doctor(needle=a.stale)
+    if getattr(a, "contradictions", False):
+        pairs = store.candidate_pairs(_doctor_shortlist())
+        issues += _llm_contradictions(pairs, getattr(a, "budget", 0.25), getattr(a, "model", None))
     if a.json:
         _p(json.dumps(issues, indent=2, sort_keys=True, default=str))
     elif not issues:
@@ -444,6 +526,11 @@ def main(argv=None) -> int:
     dc.add_argument("--stale", default=None,
                     help="value (e.g. a URL) to scan approved T2 memory for; "
                          "reports which permanent records still hold it")
+    dc.add_argument("--contradictions", action="store_true",
+                    help="also ask a model to adjudicate shortlisted record pairs for "
+                         "conflicts (costs budget; report-only, supersedes nothing)")
+    dc.add_argument("--budget", type=float, default=0.25,
+                    help="max USD for --contradictions (default 0.25)")
     dc.set_defaults(fn=cmd_doctor)
 
     rp = sub.add_parser("replay", help="layer 3: A/B measure provisional memory, report-only")
