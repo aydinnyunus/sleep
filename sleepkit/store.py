@@ -518,6 +518,73 @@ def remove_index_line(memory_dir: str, line: str, slug: str) -> bool:
     return True
 
 
+def _t2_by_slug_or_id(ref: str, memory_dir: str | None = None) -> tuple[str, str]:
+    """Find a permanent (T2) record by filename slug, or by the id inside it.
+
+    `demote` used to accept only a candidate id, so a memory whose candidate record is
+    gone (promoted before the archive existed, or written straight into the store) was
+    unreachable: `demote <slug>` answered "no such candidate" while the file sat in T2.
+    Returns (path, "") or ("", why).
+    """
+    mdir = memory_dir or paths.memory_dir()
+    if not os.path.isdir(mdir):
+        return "", "no memory dir: " + mdir
+    ref = (ref or "").strip()
+    if not ref:
+        return "", "empty reference"
+    for name in sorted(os.listdir(mdir)):
+        if not name.endswith(".md"):
+            continue
+        path = os.path.join(mdir, name)
+        try:
+            with open(path, encoding="utf-8") as fh:
+                meta, _body = parse(fh.read())
+        except (OSError, ValueError):
+            continue
+        if meta.get("status") == "retracted":
+            continue
+        if name[:-3] == ref or meta.get("id") == ref:
+            return path, ""
+    return "", "no permanent record matching %r" % ref
+
+
+def demote_by_t2(ref: str, memory_dir: str | None = None, dry_run: bool = False,
+                 note: str = "") -> tuple[bool, str]:
+    """Retract a permanent record that has no reachable candidate behind it.
+
+    Same contract as demote: the copy is MARKED retracted (never deleted), its index
+    line is dropped, and the verdict becomes visible in `status`. What differs is the
+    lookup - a T2 file is found by slug or by the id it carries, so a memory that was
+    promoted outside the normal path is still reversible.
+    """
+    path, why = _t2_by_slug_or_id(ref, memory_dir)
+    if not path:
+        return False, why
+    slug = os.path.basename(path)[:-3]
+    mdir = memory_dir or paths.memory_dir()
+    if dry_run:
+        return True, "would retract %s (drop index line, mark T2 retracted)" % slug
+    stamp = paths.now()
+    try:
+        with open(path, encoding="utf-8") as fh:
+            m2, b2 = parse(fh.read())
+    except (OSError, ValueError) as exc:
+        return False, "unreadable T2 record %s: %s" % (path, exc)
+    m2["status"] = "retracted"
+    m2["retracted_at"] = stamp
+    if note:
+        m2["note"] = note
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write(emit(m2, b2))
+    dropped = remove_index_line(mdir, "", slug) if mdir else False
+    # If a candidate is still reachable under the id the T2 copy carries, keep the two
+    # in step so a later `status` does not show a promoted candidate for a retracted file.
+    cid = m2.get("id") or ""
+    if cid and get_candidate(cid):
+        set_status(cid, "refused", {"notes": note or "retracted from T2", "reviewed": stamp})
+    return True, "retracted %s%s" % (slug, "" if dropped else " (index line not found)")
+
+
 def demote(cid: str, memory_dir: str | None = None, dry_run: bool = False,
            note: str = "") -> tuple[bool, str]:
     """T2 -> refused. Explicit human act: an approved memory turned out wrong.
@@ -531,6 +598,11 @@ def demote(cid: str, memory_dir: str | None = None, dry_run: bool = False,
     """
     got = get_candidate(cid)
     if not got:
+        # Not every permanent memory still has a candidate record (promoted before the
+        # archive existed, or written into the store directly). Fall back to the T2 file
+        # so "the permanent copy is wrong" is always actionable.
+        if _t2_by_slug_or_id(cid, memory_dir)[0]:
+            return demote_by_t2(cid, memory_dir=memory_dir, dry_run=dry_run, note=note)
         return False, "no such candidate: " + cid
     meta, body = got
     if meta.get("status") != "promoted":

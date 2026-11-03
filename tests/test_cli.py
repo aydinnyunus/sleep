@@ -695,6 +695,68 @@ class Gates(Sandbox):
         body = self.read(os.path.join(self.memory, written[0]))
         self.assertRegex(body, r"valid_from: \d{4}-\d{2}-\d{2}T")
 
+    def _orphan_t2(self, slug="orphan-note"):
+        """A permanent record with no candidate behind it: the reachability case demote
+        used to miss. Written by hand, exactly like a memory promoted before the
+        candidate archive existed."""
+        idx = ("# Index\n\n"
+               "<!-- sleep:begin (managed by sleepctl; lines here are appended, never rewritten) -->\n"
+               "- **%s**: [detail](%s.md). a permanent fact. _(promoted 2026-10-01, source=user)_\n"
+               "<!-- sleep:end -->\n" % (slug, slug))
+        self.write(os.path.join(self.memory, "MEMORY.md"), idx)
+        path = os.path.join(self.memory, slug + ".md")
+        self.write(path, "---\nid: c_orphan1\nts: 2026-10-01T10:00:00+0300\nsource: user\n"
+                         "trust: verified\nkind: fact\nstatus: promoted\nsession: s\n"
+                         "cwd: /tmp/p\ntags: \nevidence: \nsupersedes: \nsuperseded_by: \n"
+                         "redacted: false\nnotes: \npromoted_at: 2026-10-01T10:00:00+0300\n"
+                         "---\nThe staging host is mars-staging.internal.\n")
+        return path
+
+    def test_demote_finds_a_permanent_record_whose_candidate_is_gone(self):
+        """The permanent copy has to be reversible even when nothing points back to it.
+
+        A promoted memory with no reachable candidate made `demote <slug>` answer
+        "no such candidate" while the file sat in T2 as active memory - the one place a
+        wrong fact is most expensive.
+        """
+        path = self._orphan_t2()
+        got = self.cli("demote", "orphan-note", "--memory-dir", self.memory,
+                       "--note", "the host changed")
+        self.assertEqual(got.returncode, 0, got.stdout + got.stderr)
+        body = self.read(path)
+        self.assertIn("status: retracted", body)
+        self.assertIn("retracted_at:", body)
+        self.assertIn("the host changed", body)
+        idx = self.read(os.path.join(self.memory, "MEMORY.md"))
+        self.assertNotIn("**orphan-note**", idx, "the retired line must leave the index")
+        # the note text itself survives: retraction marks, it never deletes
+        self.assertIn("mars-staging.internal", body)
+
+    def test_demote_by_the_id_the_permanent_copy_carries(self):
+        """A person reading the T2 file sees an `id:` in its frontmatter; that id must
+        work as the reference too, not only the filename slug."""
+        path = self._orphan_t2()
+        got = self.cli("demote", "c_orphan1", "--memory-dir", self.memory)
+        self.assertEqual(got.returncode, 0, got.stdout + got.stderr)
+        self.assertIn("status: retracted", self.read(path))
+
+    def test_demote_says_so_when_nothing_matches_and_changes_nothing(self):
+        self._orphan_t2()
+        before = digest(os.path.join(self.memory, "orphan-note.md"))
+        got = self.cli("demote", "no-such-thing", "--memory-dir", self.memory)
+        self.assertNotEqual(got.returncode, 0)
+        self.assertIn("no such candidate", got.stdout + got.stderr)
+        self.assertEqual(digest(os.path.join(self.memory, "orphan-note.md")), before)
+
+    def test_demote_dry_run_on_an_orphan_t2_writes_nothing(self):
+        path = self._orphan_t2()
+        before, before_idx = digest(path), digest(os.path.join(self.memory, "MEMORY.md"))
+        got = self.cli("demote", "orphan-note", "--memory-dir", self.memory, "--dry-run")
+        self.assertEqual(got.returncode, 0, got.stdout + got.stderr)
+        self.assertIn("would retract", got.stdout)
+        self.assertEqual((digest(path), digest(os.path.join(self.memory, "MEMORY.md"))),
+                         (before, before_idx))
+
     def test_promote_an_unknown_id_fails_and_leaves_state_intact(self):
         self.cli("status")
         self.seed_candidate("ckeep", "Any provisional record at all.", cwd=self.proj_a)
