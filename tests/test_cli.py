@@ -2206,6 +2206,76 @@ class Unattended(Sandbox):
         self.assertNotIn("last_replay", state,
                          "a pass where nothing answered must not consume the interval")
 
+    def test_a_measured_replay_pass_records_a_quality_line_anyone_can_read(self):
+        """The dated report holds the detail, but between passes nothing said whether
+        the memory was helping. A completed pass must leave a readable summary behind,
+        both in state and inside the report, so the question is answerable without
+        opening a report file."""
+        self.seed_candidate("c-mem-1",
+                            "ALB idle timeout is 300s, shorter than the 500s Routify stream.")
+        args = ("nightly", "--min-records", "99", "--replay-tasks", self.tasks_file(),
+                "--replay-limit", "1", "--replay-interval", "168")
+        res = self.cli(*args, CLAUDE_BIN=self.fake_claude(),
+                       SLEEP_FAKE_ON=self.ON, SLEEP_FAKE_OFF=self.OFF)
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        doc = json.loads(res.stdout)
+        self.assertTrue(doc["replay"].get("ran"), doc["replay"])
+        self.assertTrue(doc["replay"]["treatment_delivered"], doc["replay"])
+        q = doc["replay"].get("quality") or {}
+        self.assertTrue(q.get("ran"), q)
+        self.assertGreaterEqual(q.get("samples"), 1, q)
+        self.assertEqual(q.get("helpful"), doc["replay"]["verdict_tally"].get("helps", 0), q)
+        line = doc["replay"].get("quality_line")
+        self.assertTrue(line.startswith("memory quality:"), line)
+        self.assertIn("helps", line, line)
+        self.assertNotIn("no replay measurement", line)
+        # the summary survives in state, so a later skipped night can still report it
+        self.assertEqual(self.read_json(os.path.join(self.sleep_home, "state.json"))
+                         .get("replay_quality"), q)
+        # the machine-readable channel keeps the line inside the one JSON document
+        self.assertIn(line, res.stdout)
+        self.assertEqual(res.stdout.count(line), 1,
+                         "the line belongs to the report, not echoed after it")
+
+    def test_a_skipped_pass_reports_the_last_real_measurement_not_a_fake_one(self):
+        """The gate skipping is not a quality signal. The line must name the last pass
+        that actually measured, so a month of skips cannot read like a month of results."""
+        self.seed_candidate("c-mem-1",
+                            "ALB idle timeout is 300s, shorter than the 500s Routify stream.")
+        args = ("nightly", "--min-records", "99", "--replay-tasks", self.tasks_file(),
+                "--replay-limit", "1", "--replay-interval", "168")
+        self.cli(*args, CLAUDE_BIN=self.fake_claude(),
+                 SLEEP_FAKE_ON=self.ON, SLEEP_FAKE_OFF=self.OFF)
+        second = self.cli(*args, CLAUDE_BIN=self.fake_claude(),
+                          SLEEP_FAKE_ON=self.ON, SLEEP_FAKE_OFF=self.OFF)
+        doc = json.loads(second.stdout)
+        self.assertTrue(doc["replay"].get("skipped"), doc["replay"])
+        eline = doc["replay"]["quality_line"]
+        self.assertIn("helps", eline, eline)
+        self.assertIn("last pass", eline, eline)
+        self.assertNotIn("no replay measurement", eline)
+
+    def test_the_quality_line_says_nothing_measured_when_the_arms_matched(self):
+        """A pass whose two arms ran the same prompt produces ties that look like
+        results. The line has to call that out instead of printing a 0/0/0 score."""
+        # no seeded candidate: both arms receive the same (empty) memory block, which is
+        # the state test_replay_run_says_nothing_was_measured_without_memory pins for replay
+        res = self.cli("nightly", "--min-records", "99", "--replay-tasks",
+                       self.tasks_file(), "--replay-limit", "1", "--replay-interval",
+                       "168", CLAUDE_BIN=self.fake_claude(),
+                       SLEEP_FAKE_ON=self.ON, SLEEP_FAKE_OFF=self.OFF)
+        doc = json.loads(res.stdout)
+        self.assertTrue(doc["replay"].get("ran"), doc["replay"])
+        self.assertFalse(doc["replay"]["treatment_delivered"], doc["replay"])
+        self.assertIn("measured nothing", doc["replay"]["quality_line"])
+
+    def test_status_reports_memory_quality_before_any_pass(self):
+        """Never-run must read as never-run, not as a zero score: status is the first
+        place a person looks, and a missing measurement is not a bad result."""
+        got = self.cli("status", "-v")
+        self.assertEqual(got.returncode, 0, got.stderr)
+        self.assertIn("memory quality: no replay measurement has run yet", got.stdout)
+
     def test_a_failed_consolidation_is_not_reported_as_a_good_night(self):
         # launchd only reads the exit code. Returning 0 while the model call failed
         # means nobody ever looks, which is how a nightly that produced nothing for a

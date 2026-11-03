@@ -283,6 +283,49 @@ def replay_due(interval_hours: float) -> tuple:
     return False, "%.1f of %.1f h since the last pass" % (elapsed, interval_hours)
 
 
+def record_quality(rep: dict) -> dict:
+    """Persist the memory-quality summary of a completed replay pass.
+
+    The dated report file holds the detail, but a skipped night leaves no trace at all,
+    so "is my memory actually helping?" had no answer between runs. A small rolling
+    summary in state.json keeps the last real measurement readable from `status` and
+    the nightly report without parsing report files.
+    """
+    tally = rep.get("verdict_tally") or {}
+    summary = {"ran": paths.now(), "tally": tally,
+               "helpful": tally.get("helps", 0),
+               "harmed": tally.get("hurts", 0),
+               "tie": tally.get("tie", 0),
+               "samples": rep.get("samples", 0),
+               "answered": rep.get("answered", 0),
+               "treatment_delivered": bool(rep.get("treatment_delivered"))}
+    paths.write_state({"replay_quality": summary})
+    return summary
+
+
+def quality_line(state: dict | None = None) -> str:
+    """One line for the nightly report: what the last real measurement said.
+
+    A skip is not a quality signal, so the line states the last measurement that
+    actually happened and how long ago, instead of pretending the skip measured
+    anything. Never-run is reported as such rather than as a zero score.
+    """
+    from . import consolidate  # lazy: hours_since lives there
+    st = state if state is not None else paths.read_state()
+    q = st.get("replay_quality") or {}
+    if not q or not q.get("ran"):
+        return "memory quality: no replay measurement has run yet"
+    age = consolidate.hours_since(q.get("ran"))
+    when = "just now" if age is None or age < 1 else (
+        "%.0fh ago" % age if age < 48 else "%.0fd ago" % (age / 24.0))
+    if not q.get("treatment_delivered"):
+        return ("memory quality: last pass (%s) delivered no treatment, so it measured "
+                "nothing" % when)
+    return ("memory quality: %d helps / %d hurts / %d ties from %d samples (last pass %s)"
+            % (q.get("helpful", 0), q.get("harmed", 0), q.get("tie", 0),
+               q.get("samples", 0), when))
+
+
 def mark_replayed() -> str:
     """Stamp last_replay so the next nightly pass waits out its interval."""
     ts = paths.now()
@@ -302,9 +345,10 @@ def nightly(tasks_path: str = DEFAULT_TASKS, model: str | None = None, budget: f
     """
     due, why = replay_due(interval_hours)
     if dry_run:
-        return {"skipped": True, "reason": "dry run", "due": due, "detail": why}
+        return {"skipped": True, "reason": "dry run", "due": due, "detail": why,
+                "quality_line": quality_line()}
     if not due:
-        return {"skipped": True, "reason": why}
+        return {"skipped": True, "reason": why, "quality_line": quality_line()}
     try:
         rep = run_suite(tasks_path=tasks_path, limit=limit, model=model, budget=budget)
         report = write_report(rep)
@@ -319,9 +363,11 @@ def nightly(tasks_path: str = DEFAULT_TASKS, model: str | None = None, budget: f
         return {"failed": True, "attempted": paths.now(), "report": report,
                 "reason": "no model call answered: 0/%d samples exited 0; first answer "
                           "began %r" % (rep["samples"], (first.get("answer") or "")[:80])}
+    summary = record_quality(rep)
     return {"ran": True, "report": report, "clock": mark_replayed(),
             "treatment_delivered": rep.get("treatment_delivered"),
-            "verdict_tally": rep.get("verdict_tally")}
+            "verdict_tally": rep.get("verdict_tally"),
+            "quality": summary, "quality_line": quality_line()}
 
 
 def write_report(rep: dict) -> str:

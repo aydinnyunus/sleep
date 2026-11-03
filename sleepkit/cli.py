@@ -66,6 +66,10 @@ def cmd_status(a) -> int:
     except OSError:
         permanent = []
     _p("sleep memory: T0=disposable captures, T1=provisional awaiting review, T2=permanent (promote-only)")
+    try:
+        _p(replay_mod.quality_line())
+    except Exception:
+        pass
     _p("T0 buffer      %d records / %d files / %d bytes  (captured while you worked)" % (bc["records"], bc["files"], bc["bytes"]))
     _p("T1 candidates  %d provisional, %d refused, %d total  (distilled, shown as unverified context)" % (len(prov), len(ref), len(cands)))
     _p("   quarantine  %d parked (needs human eyes)  (held out until you review)" % len(q))
@@ -430,7 +434,14 @@ def cmd_nightly(a) -> int:
                                        limit=a.replay_limit,
                                        interval_hours=a.replay_interval,
                                        dry_run=a.dry_run)
+    # The report is machine-read (launchd tails it, tests parse it), so stdout stays a
+    # single JSON document. The human-readable line rides inside it and is echoed as
+    # PLAIN TEXT only on a terminal, where a person is the one reading the night.
+    qline = rep["replay"].get("quality_line") or replay_mod.quality_line()
+    rep["replay"]["quality_line"] = qline
     _p(json.dumps(rep, indent=2, sort_keys=True, default=str))
+    if sys.stdout.isatty():
+        _p(qline)
     # "ran" only means the gate let the pass through. If the model call itself failed,
     # the night produced nothing and must not report success to launchd.
     slept = rep["sleep"].get("action") in ("skipped", "would-run") or (
