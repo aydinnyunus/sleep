@@ -3126,6 +3126,20 @@ class BufferWindow(Sandbox):
         self.assertIn("next pass reads the newest %d" % self.WINDOW, line[0], line[0])
         self.assertIn("3 outside the window", line[0], line[0])
 
+
+    def test_many_small_sessions_are_not_one_large_buffer(self):
+        # Fifty passes of ten records are fifty complete passes. Summing files and
+        # comparing that to a per-session window invents a backlog that no pass has.
+        for s in range(6):
+            for i in range(20):
+                got = self.cli("capture", "small session %d observation %d" % (s, i),
+                               "--session", "many%d" % s, "--cwd", self.proj_a)
+                self.assertEqual(got.returncode, 0, got.stdout + got.stderr)
+        self.assertEqual(len(self.buffer_records()), 120)
+        found = [f for f in json.loads(self.cli("doctor", "--json").stdout)
+                 if f["issue"] == "buffer-exceeds-consolidation-window"]
+        self.assertEqual(found, [], found)
+        self.assertNotIn("outside the window", self.cli("status").stdout)
     def test_doctor_reports_the_backlog_as_its_own_finding(self):
         self.fill(self.WINDOW + 2)
         found = [f for f in json.loads(self.cli("doctor", "--json").stdout)

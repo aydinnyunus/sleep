@@ -30,11 +30,32 @@ Sleep adds a reviewable memory cycle to nine selectable coding-agent targets. It
 - **A named consolidation window.** One pass is shown the newest 120 T0 records. A buffer
   past that is never silent: `distill --dry-run` and the pass itself report how many records
   fell outside the window, `status` says it before the next pass runs, and `doctor` reports
-  it as its own finding. Records outside the window are shown to no pass and cleared by no
-  prune, which is why the number is printed instead of being inferred from the proposal count.
+  it as its own finding. Records outside the window are shown to no pass, and the
+  per-session prune holds back the kinds that are expensive to re-derive (preferences,
+  procedures, environment warnings) instead of moving them out of reach with the file, so
+  what leaves T0 is what a pass could have read. The count is printed instead of being
+  inferred from the proposal count.
 - **Review before permanence.** New memories stay provisional until you promote or refuse them.
 - **Nightly dream cycle.** Mine repeated preferences, consolidate recent observations, and measure memory effects while you are away.
 - **Measured replay.** Run the same task with memory off and on before deciding whether a memory helps. Each completed pass leaves a one-line quality summary (`helps / hurts / ties`) in `status` and in the nightly report, so the question stays answerable between passes; a pass whose two arms ran the same prompt says it measured nothing instead of reporting zeros.
+- **Kind-aware lifetimes.** A record's `kind` decides how long a quiet stretch is normal.
+  `doctor` measures each provisional against its own row instead of one flat cutoff: a fact is
+  cheap to re-learn and cheap to drop (4 weeks unrediscovered / 8 weeks unserved), a preference
+  is a statement about you and people are slow (13 / 26), a procedure is durable but testable
+  (8 / 12), and an environment warning stays true long after nobody touched it (52 / 52). Every
+  finding names the kind and the threshold it used, records without a known kind keep the old
+  flat default, and nothing here drops or demotes anything.
+- **Kind-aware pruning.** `run_sleep` clears one session's records at a time, and a record whose
+  kind is expensive to re-derive is never dropped before a pass could have read it: when a
+  session's file is longer than the consolidation window, the preferences, procedures and
+  warnings older than the window stay in T0 while everything a pass could have read is archived.
+  The prune report carries `kept_count`, `kept_outside_window` and `read_window`, so the debt is
+  a number instead of an inference. `prune` with no `--session` still clears the whole buffer
+  under the old file-level rule, which is what an explicit clear-out means.
+- **Kind-aware promotion.** `promote` refuses to make an agent's reading of a *preference*
+  permanent: a statement about what you want needs your own words, while a fact, procedure or
+  warning is confirmed by the human running `promote` (you read it and chose it). The refusal
+  message names which rule stopped it, and the existing speculative-source check still runs first.
 - **Repeated preference detection.** `mine` finds instructions you gave in multiple sessions without a model call.
 - **Project isolation.** A project's provisional memory is injected only into that project.
 - **Reviewable permanence.** Each approved memory in your index carries its review date and source, so you can tell when a saved instruction was pinned.
@@ -341,7 +362,7 @@ Run the two dream components separately when you want more control:
 | `./sleep.py status -v` | ... and the last measured memory quality (`3 helps / 1 hurts / 4 ties from 8 samples`, or "no replay measurement has run yet") |
 | `./sleep.py mine --dry-run` | Find preferences repeated across sessions |
 | `./sleep.py nightly --dry-run` | Preview the unattended nightly workflow |
-| `./sleep.py doctor` | Find duplicate or overlapping memory records, flag contradicting candidates (same subject, one side carries a correction marker) and print the `supersede <older> <newer>` command to run, flag provisional candidates not rediscovered for 4+ weeks, flag records no session was ever served for 8+ weeks, flag supersede pointers that name a record no longer in the store, report a T0 buffer larger
+| `./sleep.py doctor` | Find duplicate or overlapping memory records, flag contradicting candidates (same subject, one side carries a correction marker) and print the `supersede <older> <newer>` command to run, flag provisional candidates unrediscovered past their kind's threshold (4 weeks for a fact, 13 for a preference, 8 for a procedure, 52 for a warning; kind and threshold appear in the finding), flag records no session was ever served past their kind's unused threshold (8 / 26 / 12 / 52), flag supersede pointers that name a record no longer in the store, report a T0 buffer larger
 than the 120-record consolidation window (with the count left outside it), and report records
 parked in quarantine awaiting a human (report only: it never supersedes, drops, merges or un-parks anything itself) |
 | `./sleep.py doctor --stale <value>` | Show which approved records still hold a stale value (e.g. a changed URL) |
@@ -355,6 +376,7 @@ the host agent's own `omo -p` (used when an `omo` binary is on PATH), then `clau
 `SLEEP_LLM_TRANSPORT=omo|claude|http`. A transport that is not usable on this machine
 raises instead of silently falling back, and omo is never handed the gateway's model
 name: it routes through its own config, so only `SLEEP_MODEL` reaches it.
+| `./sleep.py prune [--session <id>] [--older-than <hours>]` | Archive consumed T0 scratch, file-level: with `--session` only that session's records move, with no `--session` the whole buffer is cleared. This is the explicit clear-out, so it moves whole files and ignores kinds; the record-level rule that holds back the kinds no pass could reach belongs to the automatic pass (`run_sleep` prunes one session and reports `kept_count` / `kept_outside_window` / `read_window`) |
 | `./sleep.py supersede <old> <new>` | Mark `<old>` invalid as of now and `<new>` valid as of now (`valid_until` / `valid_from`), so the window a memory was true is readable from the files |
 | `./sleep.py inject --project "$PWD"` | Print provisional context for the current project, newest first, each line dated |
 | `./sleep.py inject --project "$PWD" --query "..."` | Same, but rank records by overlap with the live request so the most relevant survive `--max` |

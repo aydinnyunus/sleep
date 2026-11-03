@@ -33,6 +33,44 @@ STALE_CANDIDATE_WEEKS = 4.0
 # with things that were never useful. Report only, like every other doctor line.
 UNUSED_CANDIDATE_WEEKS = 8.0
 
+# What the two constants above are a default FOR. A record's kind is not decoration:
+# a warning that nobody re-learned in a month is not the same debt as a preference
+# nobody re-learned in a month, and the flat constants made the four kinds behave
+# identically. Each row is (stale_weeks, unused_weeks) and the rationale travels with
+# the number, because a bare constant invites the next reader to "tidy" it back.
+#
+#   fact       4 / 8   the old defaults; a fact is cheap to re-learn and cheap to drop
+#   preference 13 / 26 a preference is a statement about a person, and a person is
+#                      slow. Expiring one after four quiet weeks deletes a true thing
+#   procedure  8 / 12  durable but testable: a procedure that stops being exercised is
+#                      suspect sooner than a stated preference, later than a fact
+#   warning    52 / 52 an environment warning ("X does not fire on this engine") stays
+#                      true long after nobody has touched it, and the cost of
+#                      re-deriving it is paid in failed attempts
+#
+# Both remain REPORT-ONLY. Nothing here drops, demotes or expires a record; it decides
+# when doctor names one. Use lifetime_for() rather than reading the table directly.
+KIND_LIFETIME_WEEKS = {
+    "fact": (4.0, 8.0),
+    "preference": (13.0, 26.0),
+    "procedure": (8.0, 12.0),
+    "warning": (52.0, 52.0),
+}
+
+
+def lifetime_for(kind: str, default_weeks: float = 0.0) -> tuple[float, float, str]:
+    """(stale_weeks, unused_weeks, kind) for one record's kind.
+
+    An unknown or missing kind gets the historical flat default, so a record written
+    by an older version, or by hand, is judged exactly as it was before this table
+    existed. The third element is the kind actually used, so a caller can print what
+    it judged against without re-deriving the fallback.
+    """
+    row = KIND_LIFETIME_WEEKS.get(str(kind or "").strip().lower())
+    if row:
+        return row[0], row[1], str(kind)
+    return STALE_CANDIDATE_WEEKS, UNUSED_CANDIDATE_WEEKS, str(kind or "")
+
 
 def _hours_since(ts: str) -> float | None:
     """Hours since an ISO timestamp written by paths.now(). Unparseable input
@@ -170,6 +208,22 @@ def buffer_counts() -> dict:
     return {"files": len(files),
             "records": len(read_buffer()),
             "bytes": sum(os.path.getsize(os.path.join(d, f)) for f in files)}
+
+
+def buffer_session_counts() -> dict:
+    """{session: record count} for the T0 buffer, one entry per file.
+
+    A pass consolidates ONE session, so this is the count a window means anything
+    against: `buffer_counts()` totals every file in the directory and answers a
+    different question ("how much scratch is on disk").
+    """
+    d = paths.buffer_dir()
+    out = {}
+    for name in sorted(os.listdir(d)):
+        if not name.endswith(".jsonl"):
+            continue
+        out[name[:-6]] = len(read_buffer(name[:-6]))
+    return out
 
 
 # ------------------------------------------------------- similarity/dedup ---
@@ -449,6 +503,21 @@ def slugify(text: str, maxlen: int = 48) -> str:
     return (s[:maxlen].rstrip("-")) or "note"
 
 
+# What a kind is allowed to become permanent on. This is not the same question as
+# "is this record true": a directive-shaped sentence about how the agent should
+# behave is a statement about the PERSON, and only the person can confirm one, so a
+# preference keeps the existing user-provenance requirement on top of the trust
+# check. The other three kinds describe the world, and a human running `promote` is
+# the confirmation: they read the body and chose it.
+#
+# A warning is the case worth naming, because it is the kind most likely to be
+# captured from an agent's own failed attempt with no user in the loop. That is
+# still legitimate - the human reading it is the check - but the refusal message
+# below says which rule stopped it, so "why can I not promote this" never needs
+# source reading.
+KIND_PROMOTE_NEEDS_USER = ("preference",)
+
+
 def promote(cid: str, memory_dir: str | None = None, dry_run: bool = False) -> tuple[bool, str]:
     """T1 -> T2. Explicit human act. Creates a NEW file, never edits one."""
     got = get_candidate(cid)
@@ -461,6 +530,11 @@ def promote(cid: str, memory_dir: str | None = None, dry_run: bool = False) -> t
     if src != "user" and meta.get("trust") == "speculative":
         return False, ("refusing to persist speculative memory from source=%s; "
                        "re-record with the user's own words or run a replay first" % src)
+    kind = str(meta.get("kind", "") or "")
+    if kind in KIND_PROMOTE_NEEDS_USER and src != "user":
+        return False, ("refusing to persist a %s from source=%s: a statement about what "
+                       "the user wants needs the user's own words, not an agent's reading "
+                       "of them" % (kind, src))
     mdir = memory_dir or paths.memory_dir()
     name = "%s.md" % slugify(body.split(".")[0][:60] or cid)
     dest = os.path.join(mdir, name)
@@ -810,7 +884,14 @@ def supersede(old_id: str, new_id: str) -> bool:
 
 # ------------------------------------------------------------ pruning -------
 def prune_buffer(older_than_hours: float = 0.0, session: str | None = None) -> dict:
-    """T0 reset: consumed scratch moves to archive. Nothing is deleted."""
+    """T0 reset: consumed scratch moves to archive. Nothing is deleted.
+
+    File-level and kind-blind by design. It answers "has this session's scratch been
+    dealt with?", which is the right question when the caller is an explicit human
+    command. It is the WRONG tool for a record-level decision, because a file holds
+    records of every kind and moving it takes them all: use prune_session() when a
+    record that no pass read must survive.
+    """
     moved = []
     d = paths.buffer_dir()
     cutoff = time.time() - older_than_hours * 3600
@@ -827,6 +908,92 @@ def prune_buffer(older_than_hours: float = 0.0, session: str | None = None) -> d
         shutil.move(p, dest)
         moved.append(dest)
     return {"moved": moved, "remaining": buffer_counts()}
+
+
+# A kind whose records are dropped before consolidation has lost work that cannot be
+# recovered by reading the archive later: the raw text survives, but no pass and no
+# session will look at it again. These are the kinds where that loss is expensive -
+# re-deriving a preference means asking the person again, and re-deriving a warning
+# means paying for the failed attempt a second time. A fact is the one kind whose
+# loss is cheap (it can be re-learned by looking), which is why it is deliberately
+# NOT in this set: the default path must not be the expensive one.
+KEEP_WHEN_UNREAD = ("preference", "procedure", "warning")
+
+
+def prune_session(session: str, keep_kinds=KEEP_WHEN_UNREAD) -> dict:
+    """Prune ONE session's file, holding back records no pass will read.
+
+    The pass is shown the newest `consolidate.BUFFER_WINDOW` records, so anything older
+    than that is read by no pass - and a record no pass reads is also never pruned
+    (pruning follows consumption). What a file-level prune does anyway is move the whole
+    file, oldest records included, which turns "fell outside the window" from a visible
+    backlog into a silent one. This function moves the records the pass could have read
+    and keeps the rest, so a withheld record stays where the next pass can still reach it.
+
+    Imports `consolidate` lazily on purpose: consolidate imports this module at its top,
+    so a module-level import here would be circular. The one constant borrowed back is
+    the window, kept single-sourced rather than copied.
+    """
+    from . import consolidate as _consolidate
+    d = paths.buffer_dir()
+    src = os.path.join(d, session + ".jsonl")
+    if not os.path.isfile(src):
+        return {"skipped": True, "reason": "no such session", "kept": [], "moved": ""}
+    records = []
+    with open(src, encoding="utf-8") as fh:
+        for line in fh:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                records.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+    # The window decides what a pass READS, and a pass having read a record is what
+    # licenses pruning it. It says nothing about whether the record was worth keeping:
+    # a preference inside the window is still a preference, and a prune has no business
+    # dropping it because the pass happened to look at it. A record outside the window
+    # is the one case where nothing will ever read it again. So the kind filter runs
+    # over the WHOLE file rather than over the tail alone, and what survives stays.
+    _window = _consolidate.BUFFER_WINDOW
+    in_window = records[max(0, len(records) - _window):]
+    held = [r for r in records if str(r.get("kind", "")) in keep_kinds]
+    held_outside = [r for r in held if r not in in_window]
+    if not held:
+        return prune_buffer(older_than_hours=0.0, session=session)
+    dropped = [r for r in records if str(r.get("kind", "")) not in keep_kinds]
+    # The keep file holds ONLY the records whose kind earned survival; the rest go to
+    # the archive. An earlier draft appended the in-window records here as well, which
+    # silently rewrote the file with its own contents and reported a "kept" count while
+    # nothing changed - the exact shape of bug this function exists to prevent, so the
+    # rewrite is asserted below rather than assumed.
+    keep_sorted = sorted(held, key=lambda r: str(r.get("ts", "")))
+    tmp = src + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        for r in keep_sorted:
+            fh.write(json.dumps(r, sort_keys=True) + "\n")
+    os.replace(tmp, src)
+    after = read_buffer(session)
+    if len(after) != len(keep_sorted):
+        raise RuntimeError("prune_session rewrite failed: %d kept, %d on disk"
+                           % (len(keep_sorted), len(after)))
+    # The records the pass COULD read, plus the withheld ones whose kind is safe to
+    # drop, go to the archive rather than the keep file; nothing is deleted and the
+    # archive path is the one prune_buffer already uses.
+    dest = os.path.join(paths.archive_dir("buffer"),
+                        time.strftime("%Y%m%d-") + session + ".jsonl")
+    n = 1
+    while os.path.exists(dest):
+        dest = os.path.join(paths.archive_dir("buffer"),
+                            time.strftime("%Y%m%d-") + "%s-%d.jsonl" % (session, n))
+        n += 1
+    with open(dest, "w", encoding="utf-8") as fh:
+        for r in dropped:
+            fh.write(json.dumps(r, sort_keys=True) + "\n")
+    return {"moved": dest, "archived_records": len(dropped),
+            "kept": [r["id"] for r in held], "kept_count": len(held),
+            "kept_outside_window": len(held_outside), "read_window": len(in_window),
+            "remaining": buffer_counts()}
 
 
 # Tags are the only index a record carries besides its project, so they are kept
@@ -1041,7 +1208,6 @@ def doctor(memory_dir: str | None = None, targets: list[str] | None = None,
                                 "pair": [pool[i][0], pool[j][0]], "similarity": round(sim, 2),
                                 "older": older, "newer": newer,
                                 "suggest": "sleep.py supersede %s %s" % (older, newer)})
-    cutoff_hours = STALE_CANDIDATE_WEEKS * 7 * 24
     for c in list_candidates():
         if c.get("status") != "provisional":
             continue
@@ -1049,10 +1215,15 @@ def doctor(memory_dir: str | None = None, targets: list[str] | None = None,
         # record's own creation ts. A provisional that is neither being promoted
         # nor re-learned for weeks is noise the queue keeps injecting into every
         # session's context, so the doctor surfaces it (report only, nothing drops).
+        # "Weeks" is per kind: the same quiet month means different things for a
+        # preference and for an environment warning (see KIND_LIFETIME_WEEKS).
+        stale_weeks, _unused_weeks, kind = lifetime_for(c.get("kind", ""))
         last = c.get("rediscovered_at") or c.get("ts")
         age_h = _hours_since(str(last)) if last else None
-        if age_h is not None and age_h >= cutoff_hours:
+        if age_h is not None and age_h >= stale_weeks * 7 * 24:
             out.append({"issue": "stale-candidate-unrediscovered", "id": c["id"],
+                        "kind": kind, "threshold_weeks": stale_weeks,
+                        "age_days": int(age_h // 24),
                         "last_seen": str(last)[:10], "rediscovered": int(c.get("rediscovered", 0) or 0)})
     # The sibling of the check above, measuring a different emptiness. That one says
     # "nobody re-learned this"; this one says "nobody ever asked for this": no inject
@@ -1060,30 +1231,36 @@ def doctor(memory_dir: str | None = None, targets: list[str] | None = None,
     # perfectly true and still be worth naming here, because the cost it carries is
     # paid by every session that shares the project and the evidence it is worth
     # paying is published in the record itself.
-    unused_cutoff = UNUSED_CANDIDATE_WEEKS * 7 * 24
     for c in list_candidates():
         if c.get("status") != "provisional":
             continue
         served = int(c.get("injected", 0) or 0) + int(c.get("rediscovered", 0) or 0)
         if served:
             continue
+        _stale_weeks, unused_weeks, kind = lifetime_for(c.get("kind", ""))
         age_h = _hours_since(str(c.get("ts", ""))) if c.get("ts") else None
-        if age_h is not None and age_h >= unused_cutoff:
+        if age_h is not None and age_h >= unused_weeks * 7 * 24:
             out.append({"issue": "unused-candidate-never-served", "id": c["id"],
+                        "kind": kind, "threshold_weeks": unused_weeks,
                         "age_days": int(age_h // 24),
                         "injected": 0, "rediscovered": 0})
-    # The one input limit that is not a content judgement: consolidation is shown only
-    # the newest WINDOW records, so a buffer larger than that carries records no pass
-    # will read and no prune will clear. Measured on the honest definition of a pass -
-    # what the CLI actually hands over - and reported here rather than raised to a
-    # failure, because a large buffer may be a real backlog rather than an error.
+    # The one input limit that is not a content judgement: a pass is shown only the
+    # newest WINDOW records OF THE SESSION IT CONSOLIDATES, so a session larger than
+    # that carries records no pass will read. Counted per session, on the honest
+    # definition of a pass - `run_sleep`/`distill` hand over one session file - because
+    # the total across sessions compares a number to a limit it was never measured
+    # against: fifty sessions of ten records each are fifty complete passes, not one
+    # buffer of five hundred with four hundred and eighty unread. Reported rather than
+    # raised to a failure, because a large session may be a real backlog.
     from . import consolidate as _consolidate
-    t0_records = buffer_counts()["records"]
-    if t0_records > _consolidate.BUFFER_WINDOW:
-        out.append({"issue": "buffer-exceeds-consolidation-window",
-                    "buffer_records": t0_records,
-                    "window": _consolidate.BUFFER_WINDOW,
-                    "outside_window": t0_records - _consolidate.BUFFER_WINDOW})
+    _window = _consolidate.BUFFER_WINDOW
+    for _session, _count in sorted(buffer_session_counts().items()):
+        if _count > _window:
+            out.append({"issue": "buffer-exceeds-consolidation-window",
+                        "session": _session,
+                        "buffer_records": _count,
+                        "window": _window,
+                        "outside_window": _count - _window})
     for cid, body in pool:
         for path, text in bodies.items():
             # MEMORY.md is the index: it restates every entry by design, so scoring

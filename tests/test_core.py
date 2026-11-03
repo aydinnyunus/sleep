@@ -6,6 +6,7 @@ deliberately does not carry.)
 """
 import json
 import os
+import re
 import shutil
 import tempfile
 import unittest
@@ -302,6 +303,198 @@ class T(unittest.TestCase):
         self.assertEqual(len(rep["moved"]), 1)
         self.assertTrue(os.path.exists(rep["moved"][0]))
         self.assertEqual(store.read_buffer("s5"), [])
+
+    # -- kind decides lifetime and survival --------------------------------
+    def test_lifetime_table_matches_the_documented_defaults(self):
+        # The flat pair used to be the only rule; it is now the fallback, so these two
+        # numbers must not drift apart from KIND_LIFETIME_WEEKS["fact"].
+        self.assertEqual(store.lifetime_for("fact"), (4.0, 8.0, "fact"))
+        self.assertEqual(store.lifetime_for("preference"), (13.0, 26.0, "preference"))
+        self.assertEqual(store.lifetime_for("procedure"), (8.0, 12.0, "procedure"))
+        self.assertEqual(store.lifetime_for("warning"), (52.0, 52.0, "warning"))
+
+    def test_unknown_kind_falls_back_to_the_flat_default(self):
+        # A record written by an older version, or by hand, carries no kind the table
+        # knows. It must be judged exactly as it was before the table existed.
+        for odd in ("", "bogus", None, "  "):
+            self.assertEqual(store.lifetime_for(odd),
+                             (store.STALE_CANDIDATE_WEEKS,
+                              store.UNUSED_CANDIDATE_WEEKS, str(odd or "")), repr(odd))
+
+    def _age(self, cid, days):
+        """Rewrite one candidate's ts to `days` ago, keeping everything else."""
+        import datetime as _dt
+        path = os.path.join(paths.candidates_dir(), cid + ".md")
+        with open(path, encoding="utf-8") as fh:
+            text = fh.read()
+        stamp = (_dt.datetime.now().astimezone()
+                 - _dt.timedelta(days=days)).isoformat()
+        out = re.sub(r"^ts: .*$", "ts: " + stamp, text, count=1, flags=re.M)
+        self.assertNotEqual(out, text, "ts field not found in " + path)
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(out)
+
+    def _record(self, body, kind, days):
+        ok, cid = store.add_candidate(body, kind=kind, source="agent")
+        self.assertTrue(ok, cid)
+        self._age(cid, days)
+        return cid
+
+    def test_a_preference_outlives_a_fact_at_the_same_age(self):
+        # 30 days is stale for a fact (4 weeks) and quiet for a preference (13 weeks).
+        # Before the table both were flagged, which is the bug this pins.
+        fact = self._record("the registry mirror drops auth headers over http1", "fact", 30)
+        pref = self._record("expects replies in turkish with english technical nouns",
+                            "preference", 30)
+        flagged = {r["id"] for r in store.doctor()
+                   if r["issue"] == "stale-candidate-unrediscovered"}
+        self.assertIn(fact, flagged)
+        self.assertNotIn(pref, flagged)
+
+    def test_a_long_quiet_warning_still_survives_its_threshold(self):
+        # Two years is past even the warning row, so the finding must appear - and it
+        # must name the kind and the threshold it judged against, not the flat pair.
+        warn = self._record("UserPromptSubmit never fires on this engine", "warning", 730)
+        rows = [r for r in store.doctor()
+                if r["issue"] == "stale-candidate-unrediscovered" and r["id"] == warn]
+        self.assertEqual(len(rows), 1, rows)
+        self.assertEqual(rows[0]["kind"], "warning")
+        self.assertEqual(rows[0]["threshold_weeks"], 52.0)
+
+    def test_prune_keeps_unread_records_worth_keeping(self):
+        # 130 records, the ten oldest a mix of durable kinds. A file-level prune moved
+        # all 130 to the archive; the pass can only read the newest 120, so those ten
+        # were dropped without any pass ever seeing them.
+        src = os.path.join(paths.buffer_dir(), "sK.jsonl")
+        kinds = ["preference", "procedure", "warning"]
+        with open(src, "w", encoding="utf-8") as fh:
+            for i in range(130):
+                fh.write(json.dumps({"id": "r%03d" % i,
+                                     "ts": "2026-11-03T%02d:00:00+0300" % (i % 24),
+                                     "kind": kinds[i % 3] if i < 10 else "fact",
+                                     "source": "agent", "text": "record %d" % i}) + "\n")
+        rep = store.prune_session("sK")
+        self.assertEqual(rep["kept_count"], 10, rep)
+        left = store.read_buffer("sK")
+        self.assertEqual(len(left), 10, left)
+        self.assertEqual(sorted({r["kind"] for r in left}), sorted(kinds))
+        # The 120 the pass could read are the ones licensed to move.
+        self.assertEqual(rep["archived_records"], 120, rep)
+
+    def test_prune_still_clears_a_buffer_with_nothing_to_keep(self):
+        src = os.path.join(paths.buffer_dir(), "sL.jsonl")
+        with open(src, "w", encoding="utf-8") as fh:
+            for i in range(130):
+                fh.write(json.dumps({"id": "f%03d" % i, "ts": "2026-11-03T00:00:00+0300",
+                                     "kind": "fact", "source": "agent",
+                                     "text": "fact %d" % i}) + "\n")
+        rep = store.prune_session("sL")
+        self.assertFalse(os.path.exists(src))
+        self.assertEqual(store.buffer_counts()["records"], 0)
+        self.assertIn("moved", rep)
+
+    def test_prune_keeps_a_durable_record_inside_the_window_too(self):
+        # The window decides what is READ, not what is worth keeping: a preference the
+        # pass happened to read is still a preference, and a prune has no business
+        # dropping it. An earlier draft passed this by accident (it kept everything) and
+        # `test_prune_keeps_unread_records_worth_keeping` is what caught the difference.
+        src = os.path.join(paths.buffer_dir(), "sM.jsonl")
+        with open(src, "w", encoding="utf-8") as fh:
+            for i in range(130):
+                fh.write(json.dumps({"id": "m%03d" % i, "ts": "2026-11-03T00:00:00+0300",
+                                     "kind": "preference" if i >= 125 else "fact",
+                                     "source": "agent", "text": "rec %d" % i}) + "\n")
+        rep = store.prune_session("sM")
+        self.assertEqual(rep["kept_count"], 5, rep)
+        self.assertEqual(rep["archived_records"], 125, rep)
+        self.assertEqual(len(store.read_buffer("sM")), 5)
+
+    def test_prune_refuses_to_report_a_rewrite_it_did_not_make(self):
+        # The failure this guards is the one that shipped in the first draft: the file
+        # was rewritten with its own contents while the return value said records were
+        # kept. Asserting on the returned count alone cannot see that, so the count is
+        # compared with what is on disk.
+        src = os.path.join(paths.buffer_dir(), "sN.jsonl")
+        with open(src, "w", encoding="utf-8") as fh:
+            for i in range(130):
+                fh.write(json.dumps({"id": "n%03d" % i, "ts": "2026-11-03T00:00:00+0300",
+                                     "kind": "preference" if i < 7 else "fact",
+                                     "source": "agent", "text": "rec %d" % i}) + "\n")
+        rep = store.prune_session("sN")
+        on_disk = store.read_buffer("sN")
+        self.assertEqual(len(on_disk), rep["kept_count"], rep)
+        self.assertNotEqual(len(on_disk), 130)
+
+    def test_prune_reports_how_much_of_the_read_window_survived(self):
+        # The count that would have been the silent loss: how many of the kept records
+        # no pass will ever read. Reported rather than inferred from a proposal count.
+        for i in range(30):
+            ok, _ = store.capture("a preference worth keeping %d" % i, kind="preference",
+                                  source="agent", session="sW")
+            self.assertTrue(ok)
+        rep = store.prune_session("sW")
+        self.assertEqual(rep["read_window"], 30)
+        self.assertEqual(rep["kept_count"], 30)
+        self.assertEqual(rep["kept_outside_window"], 0)
+
+    def test_prune_session_is_idempotent(self):
+        src = os.path.join(paths.buffer_dir(), "sO.jsonl")
+        with open(src, "w", encoding="utf-8") as fh:
+            for i in range(130):
+                fh.write(json.dumps({"id": "o%03d" % i, "ts": "2026-11-03T00:00:00+0300",
+                                     "kind": "warning" if i < 3 else "fact",
+                                     "source": "agent", "text": "rec %d" % i}) + "\n")
+        first = store.prune_session("sO")
+        second = store.prune_session("sO")
+        self.assertEqual(first["kept_count"], 3, first)
+        # Nothing left to hold back, so the second call falls through to the file move.
+        self.assertTrue(second.get("skipped") or second.get("moved"), second)
+        self.assertEqual(len(store.read_buffer("sO")), 3)
+
+    def test_prune_session_missing_file_is_not_an_error(self):
+        rep = store.prune_session("never-existed")
+        self.assertTrue(rep["skipped"])
+        self.assertEqual(rep["reason"], "no such session")
+
+    def test_a_preference_from_an_agent_cannot_become_permanent(self):
+        # "is this true" and "does this person want this" are different questions. A
+        # directive-shaped record is a statement about the person, so an agent's
+        # reading of it is not enough to make it permanent.
+        ok, cid = store.add_candidate("the user wants replies in turkish always",
+                                      kind="preference", source="agent", trust="observed")
+        self.assertTrue(ok, cid)
+        promoted, msg = store.promote(cid)
+        self.assertFalse(promoted)
+        self.assertIn("needs the user's own words", msg)
+        meta, _ = store.get_candidate(cid)
+        self.assertNotEqual(meta.get("status"), "promoted")
+
+    def test_a_preference_recorded_in_the_users_words_is_promotable(self):
+        ok, cid = store.add_candidate("the user wants replies in turkish throughout",
+                                      kind="preference", source="user", trust="verified")
+        self.assertTrue(ok, cid)
+        promoted, msg = store.promote(cid, dry_run=True)
+        self.assertTrue(promoted, msg)
+
+    def test_a_world_fact_or_warning_from_an_agent_is_promotable(self):
+        # The human running promote is the check for these: they read the body and
+        # chose it. Only the person-shaped kind needs the person's own words.
+        ok, cid = store.add_candidate("the mirror drops auth on http1 request paths",
+                                      kind="fact", source="agent", trust="observed")
+        self.assertTrue(ok, cid)
+        self.assertTrue(store.promote(cid, dry_run=True)[0])
+        ok2, cid2 = store.add_candidate("a hook event can look supported and never fire here",
+                                        kind="warning", source="agent", trust="observed")
+        self.assertTrue(ok2, cid2)
+        self.assertTrue(store.promote(cid2, dry_run=True)[0])
+
+    def test_speculative_still_needs_a_user_source_and_names_that_rule(self):
+        ok, cid = store.add_candidate("an unverified guess about how the world works",
+                                      kind="fact", source="inferred", trust="speculative")
+        self.assertTrue(ok, cid)
+        promoted, msg = store.promote(cid)
+        self.assertFalse(promoted)
+        self.assertIn("speculative", msg)
 
     # -- proposal ingestion ------------------------------------------------
     def test_stdout_proposals_parse_and_gate(self):

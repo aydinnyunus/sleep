@@ -483,8 +483,17 @@ def run_sleep(session=None, model=None, budget_usd=1.0, min_records=3,
         # Synaptic pruning only after a consolidation that actually produced
         # proposals. Pruning a buffer the model never read would silently discard
         # the session's observations.
+        #
+        # Per session, not the whole directory, because the interesting case is one
+        # session whose file outgrew the read window: a file-level move takes the
+        # oldest records with it, and those are exactly the records no pass read. The
+        # session is the one this pass consolidated; with no session given, the buffer
+        # is cleared as a whole under the old file-level rule.
         if result.get("consumed"):
-            result["pruned"] = store.prune_buffer(older_than_hours=0.0)
+            if session:
+                result["pruned"] = store.prune_session(session)
+            else:
+                result["pruned"] = store.prune_buffer(older_than_hours=0.0)
         else:
             result["pruned"] = {"skipped": True, "reason": "no proposals consumed"}
         result["action"] = "ran"

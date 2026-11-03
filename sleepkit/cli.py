@@ -209,6 +209,12 @@ def cmd_supersede(a) -> int:
 
 
 def cmd_prune(a) -> int:
+    # `prune` is the explicit-act path, so it keeps the file-level rule it always had:
+    # both flags keep working, and "clear this session out" still clears the session.
+    # The record-level rule (hold back the kinds no pass could have read) belongs to an
+    # automatic pass, which has a read window to measure against and cannot ask; it is
+    # what `run_sleep` calls. Routing a typed command into it would also quietly ignore
+    # `--older-than`, which asks about file age and has no record-level meaning.
     rep = store.prune_buffer(older_than_hours=a.older_than, session=a.session)
     _p(json.dumps(rep, indent=2, sort_keys=True))
     return 0

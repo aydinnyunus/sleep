@@ -531,3 +531,55 @@ still reports the buffer size it did not read.
 Deliberately NOT changed, since the two are separable and only the reporting was asked for: the pass
 still reads only the newest window and the rest still waits for the next night. Sending a large
 buffer in several passes is a separate change with its own cost (one model call per slice).
+
+## 2026-11-03: a record's kind decides how long a quiet stretch is normal
+
+`kind` was carried on every record and read by nothing. All four kinds shared one pair of
+thresholds (`STALE_CANDIDATE_WEEKS = 4.0`, `UNUSED_CANDIDATE_WEEKS = 8.0`), `prune_buffer` moved
+whole files without looking, and `promote` never saw the field. The live T1 pool is 12 candidates -
+6 preferences, 5 facts, 1 warning - so a statement about the person and a cheap observation were
+being judged by the same clock, and a warning that stops an agent from repeating a failed attempt
+had the shortest life of the four.
+
+Three changes, each independently visible:
+
+- `store.KIND_LIFETIME_WEEKS` gives each kind its own row - fact 4/8, preference 13/26, procedure
+  8/12, warning 52/52 (unrediscovered/unserved weeks) - and `doctor` now measures against it. Every
+  finding carries `kind` and the `threshold_weeks` it used, so a number in the report can be
+  checked against the row that produced it. A record whose kind is missing or unknown keeps the
+  historical flat default, which is what makes this safe to ship over an existing store.
+- `store.prune_session` is the record-level prune: it holds back the kinds that are expensive to
+  re-derive (preference, procedure, warning) instead of moving them out of reach with the file.
+  Measured against a clean `SLEEP_HOME`: a 130-record session with 10 durable records leaves 10 on
+  disk and archives 120; a 125-record session of preferences alone keeps all 5 that the window
+  could not reach and reports `kept_outside_window: 5`, `read_window: 120`.
+- `store.KIND_PROMOTE_NEEDS_USER` holds `preference`, so `promote` refuses to make an agent's
+  reading of a preference permanent (`a statement about what the user wants needs the user's own
+  words`). Facts, procedures and warnings stay promotable from any source, because the human
+  running `promote` is the confirmation - they read the body and chose it - and a warning captured
+  from an agent's own failed attempt is the normal way one arrives.
+
+Where this stops, deliberately, so the edges are not mistaken for coverage:
+
+- The prune hold-back is on `store.prune_session` and `run_sleep` calls it for the session it
+  consolidated. The `prune` COMMAND stays file-level: it is the explicit clear-out, `--older-than`
+  asks about file age and has no record-level meaning, and routing a typed command into the
+  record-level rule would quietly ignore that flag.
+- `KIND_PROMOTE_NEEDS_USER` is one kind, not a general "every kind needs its own confirmation"
+  rule. A broader gate would fire on cases where an agent-recorded warning or procedure is
+  perfectly legitimate, and an always-on confirmation is a gate nobody reads.
+- `candidate_pairs()` is untouched: it still orders by `ts` and still makes one model call per pair.
+  Named here because the file is back in this diff and the leftover should not be read as new.
+- Nothing drops, demotes or expires on the basis of these tables. `doctor` reports; the thresholds
+  only decide when it speaks.
+
+Pinned by `tests/test_core.py::KindLifetimes` (table matches the documented defaults; an unknown
+kind falls back; a 30-day preference is not stale while a 30-day fact is; a 730-day warning still
+sits below its own 52-week threshold) and `tests/test_core.py::RecordLevelPrune` (unread durable
+records survive, a session with nothing to keep still clears, records inside the window survive
+too, the reported rewrite is checked against the file, an idempotent second run, a missing session
+is not an error), plus `tests/test_cli.py::KindPromotion` (agent preference refused, user
+preference promotable, agent fact and warning promotable, speculative source still named) and the
+per-session `buffer-exceeds-consolidation-window` finding
+(`test_many_small_sessions_are_not_one_large_buffer`: six 20-record sessions are six complete
+passes, not one 120-record buffer, and the doctor says nothing).
