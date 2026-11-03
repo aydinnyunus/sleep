@@ -1,6 +1,6 @@
 {
   "name": "pi-sleep-agent",
-  "version": "0.8.9",
+  "version": "0.8.10",
   "description": "A reviewable sleep and dream cycle for Pi agent memory.",
   "type": "module",
   "license": "MIT",
