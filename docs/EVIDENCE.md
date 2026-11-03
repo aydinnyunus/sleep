@@ -496,3 +496,38 @@ crossing a process boundary with a prompt-recording fake model),
 Not changed, and named here so the leftover is not mistaken for coverage: `candidate_pairs()`
 still orders by `ts` and still makes one model call per pair, and `cmd_doctor` does not call it.
 It is a duplicate of the ordering rule with a per-pair cost, left alone deliberately.
+
+
+## 2026-11-03: the consolidation window is named, and the record left outside it is counted
+
+`_fmt_buffer` showed a consolidation pass only the newest 120 T0 records. Everything older was
+never read by any pass, and because pruning only clears what a pass consumed, never cleared either.
+Nothing said so: the night reported `proposals: 2` whether the buffer held 12 records or 300, and
+that number reads as a complete pass.
+
+Measured before changing anything, and the honest reading is that the cap had never bitten here:
+`~/.sleep/archive/buffer` holds 31 consumed buffers totalling 259 records, the largest a single
+night ever held was 73, and the live buffer held 1. So this was a latent silent loss, not an
+observed one, and the change is about the report rather than about the limit.
+
+What the window now costs to see, all three surfaces checked against a real 127-record buffer in a
+throwaway `SLEEP_HOME`:
+
+| surface | without the window | with records outside it |
+|---|---|---|
+| `distill --dry-run` / the pass result | key absent | `outside_window: 7`, `warn: "7 of 127 buffer records fell outside the 120-record window and were not read or pruned"` |
+| `sleep.py status` | T0 line unchanged | `T0 buffer 127 records ... [next pass reads the newest 120; 7 outside the window]` |
+| `sleep.py doctor` | no finding | `{"issue": "buffer-exceeds-consolidation-window", "buffer_records": 127, "window": 120, "outside_window": 7}` |
+
+`run_sleep` now persists `buffer_records` and `outside_window` in `state.json` next to `proposals`,
+so a night that left records behind is readable after the fact. The window lives in one place,
+`sleepkit.consolidate.BUFFER_WINDOW`, and the sentence is built by one helper (`_window_warning`,
+wrapped by `_warn_field` so the key is absent rather than empty when there is nothing to report) so
+the preview and the real pass cannot drift. Pinned by `tests/test_cli.py::BufferWindow` (5 tests,
+crossing a process boundary): under the window nothing appears in any of the three surfaces, at
+`WINDOW + 7` the count and the sentence say both numbers, and a pass the record/time gate *refuses*
+still reports the buffer size it did not read.
+
+Deliberately NOT changed, since the two are separable and only the reporting was asked for: the pass
+still reads only the newest window and the rest still waits for the next night. Sending a large
+buffer in several passes is a separate change with its own cost (one model call per slice).

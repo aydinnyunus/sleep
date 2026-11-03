@@ -1072,6 +1072,18 @@ def doctor(memory_dir: str | None = None, targets: list[str] | None = None,
             out.append({"issue": "unused-candidate-never-served", "id": c["id"],
                         "age_days": int(age_h // 24),
                         "injected": 0, "rediscovered": 0})
+    # The one input limit that is not a content judgement: consolidation is shown only
+    # the newest WINDOW records, so a buffer larger than that carries records no pass
+    # will read and no prune will clear. Measured on the honest definition of a pass -
+    # what the CLI actually hands over - and reported here rather than raised to a
+    # failure, because a large buffer may be a real backlog rather than an error.
+    from . import consolidate as _consolidate
+    t0_records = buffer_counts()["records"]
+    if t0_records > _consolidate.BUFFER_WINDOW:
+        out.append({"issue": "buffer-exceeds-consolidation-window",
+                    "buffer_records": t0_records,
+                    "window": _consolidate.BUFFER_WINDOW,
+                    "outside_window": t0_records - _consolidate.BUFFER_WINDOW})
     for cid, body in pool:
         for path, text in bodies.items():
             # MEMORY.md is the index: it restates every entry by design, so scoring

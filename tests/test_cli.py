@@ -3076,5 +3076,75 @@ class ModelNaming(Sandbox):
         log = self.consolidate()
         self.assertIn("--model anthropic/claude-haiku-4-5", log, log)
 
+class BufferWindow(Sandbox):
+    """T0 larger than one consolidation window: the leftover is named, not silent.
+
+    `_fmt_buffer` is a display limit, so records below it are never shown to a pass and,
+    because prune only clears what a pass consumed, never cleared either. These tests
+    pin the three places that have to agree about that number: `distill`'s result,
+    `status`, and `doctor`.
+    """
+
+    WINDOW = 120  # sleepkit.consolidate.BUFFER_WINDOW, inline so the test states it
+
+    def fill(self, n):
+        for i in range(n):
+            got = self.cli("capture", "observation %d about the staging gateway" % i,
+                           "--session", "win", "--cwd", self.proj_a)
+            self.assertEqual(got.returncode, 0, got.stdout + got.stderr)
+        return self.buffer_records()
+
+    def test_a_buffer_inside_the_window_reports_nothing_extra(self):
+        self.fill(5)
+        rep = self.cli("distill", "--session", "win", "--dry-run")
+        self.assertEqual(rep.returncode, 0, rep.stdout + rep.stderr)
+        doc = json.loads(rep.stdout)
+        self.assertEqual(doc["outside_window"], 0)
+        self.assertNotIn("warn", doc)
+        self.assertNotIn("outside", self.cli("status").stdout)
+        found = [f for f in json.loads(self.cli("doctor", "--json").stdout)
+                 if f["issue"] == "buffer-exceeds-consolidation-window"]
+        self.assertEqual(found, [], "a buffer under the window is not a backlog")
+
+    def test_the_records_past_the_window_are_counted_and_named(self):
+        want = self.WINDOW + 7
+        self.fill(want)
+        rep = self.cli("distill", "--session", "win", "--dry-run")
+        doc = json.loads(rep.stdout)
+        self.assertEqual(doc["buffer_records"], want, rep.stdout)
+        self.assertEqual(doc["outside_window"], 7, rep.stdout)
+        # The count is of records the pass will not read, and the sentence has to say
+        # both numbers: "7 skipped" alone does not tell you out of how many.
+        self.assertIn("7 of %d buffer records" % want, doc["warn"], doc["warn"])
+        self.assertIn("not read or pruned", doc["warn"], doc["warn"])
+
+    def test_status_names_the_window_before_the_next_pass_runs(self):
+        self.fill(self.WINDOW + 3)
+        line = [row for row in self.cli("status").stdout.splitlines()
+                if row.startswith("T0 buffer")]
+        self.assertEqual(len(line), 1, "the T0 line moved or disappeared")
+        self.assertIn("next pass reads the newest %d" % self.WINDOW, line[0], line[0])
+        self.assertIn("3 outside the window", line[0], line[0])
+
+    def test_doctor_reports_the_backlog_as_its_own_finding(self):
+        self.fill(self.WINDOW + 2)
+        found = [f for f in json.loads(self.cli("doctor", "--json").stdout)
+                 if f["issue"] == "buffer-exceeds-consolidation-window"]
+        self.assertEqual(len(found), 1, "expected exactly one backlog finding")
+        self.assertEqual(found[0]["buffer_records"], self.WINDOW + 2)
+        self.assertEqual(found[0]["window"], self.WINDOW)
+        self.assertEqual(found[0]["outside_window"], 2)
+
+    def test_a_skipped_pass_still_reports_the_window_it_did_not_read(self):
+        # sleep_gate refuses a second pass inside the interval. The refusal is about
+        # WHEN, and the buffer size is about WHAT, so the count survives the skip.
+        self.fill(self.WINDOW + 1)
+        got = self.cli("sleep", "--session", "win", "--min-records", "999")
+        self.assertEqual(got.returncode, 0, got.stdout + got.stderr)
+        doc = json.loads(got.stdout)
+        self.assertEqual(doc["action"], "skipped", got.stdout)
+        self.assertEqual(doc["buffer_records"], self.WINDOW + 1, got.stdout)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

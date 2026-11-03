@@ -70,7 +70,14 @@ def cmd_status(a) -> int:
         _p(replay_mod.quality_line())
     except Exception:
         pass
-    _p("T0 buffer      %d records / %d files / %d bytes  (captured while you worked)" % (bc["records"], bc["files"], bc["bytes"]))
+    line = "T0 buffer      %d records / %d files / %d bytes  (captured while you worked)" % (bc["records"], bc["files"], bc["bytes"])
+    # A window smaller than the buffer is the one case where the next pass cannot read
+    # everything it is standing on. Say it up front instead of leaving it to be inferred
+    # from the proposals count of a night that already happened.
+    if bc["records"] > consolidate.BUFFER_WINDOW:
+        line += "  [next pass reads the newest %d; %d outside the window]" % (
+            consolidate.BUFFER_WINDOW, bc["records"] - consolidate.BUFFER_WINDOW)
+    _p(line)
     _p("T1 candidates  %d provisional, %d refused, %d total  (distilled, shown as unverified context)" % (len(prov), len(ref), len(cands)))
     _p("   quarantine  %d parked (needs human eyes)  (held out until you review)" % len(q))
     retracted = []

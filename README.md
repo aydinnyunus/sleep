@@ -27,6 +27,11 @@ Sleep adds a reviewable memory cycle to nine selectable coding-agent targets. It
 
 - **Automatic capture.** Hooks and the Pi extension collect useful observations while you work.
 - **Budgeted consolidation.** Sleep runs only after the record and time gates pass.
+- **A named consolidation window.** One pass is shown the newest 120 T0 records. A buffer
+  past that is never silent: `distill --dry-run` and the pass itself report how many records
+  fell outside the window, `status` says it before the next pass runs, and `doctor` reports
+  it as its own finding. Records outside the window are shown to no pass and cleared by no
+  prune, which is why the number is printed instead of being inferred from the proposal count.
 - **Review before permanence.** New memories stay provisional until you promote or refuse them.
 - **Nightly dream cycle.** Mine repeated preferences, consolidate recent observations, and measure memory effects while you are away.
 - **Measured replay.** Run the same task with memory off and on before deciding whether a memory helps. Each completed pass leaves a one-line quality summary (`helps / hurts / ties`) in `status` and in the nightly report, so the question stays answerable between passes; a pass whose two arms ran the same prompt says it measured nothing instead of reporting zeros.
@@ -336,7 +341,9 @@ Run the two dream components separately when you want more control:
 | `./sleep.py status -v` | ... and the last measured memory quality (`3 helps / 1 hurts / 4 ties from 8 samples`, or "no replay measurement has run yet") |
 | `./sleep.py mine --dry-run` | Find preferences repeated across sessions |
 | `./sleep.py nightly --dry-run` | Preview the unattended nightly workflow |
-| `./sleep.py doctor` | Find duplicate or overlapping memory records, flag contradicting candidates (same subject, one side carries a correction marker) and print the `supersede <older> <newer>` command to run, flag provisional candidates not rediscovered for 4+ weeks, flag records no session was ever served for 8+ weeks, flag supersede pointers that name a record no longer in the store, and report records parked in quarantine awaiting a human (report only: it never supersedes, drops, merges or un-parks anything itself) |
+| `./sleep.py doctor` | Find duplicate or overlapping memory records, flag contradicting candidates (same subject, one side carries a correction marker) and print the `supersede <older> <newer>` command to run, flag provisional candidates not rediscovered for 4+ weeks, flag records no session was ever served for 8+ weeks, flag supersede pointers that name a record no longer in the store, report a T0 buffer larger
+than the 120-record consolidation window (with the count left outside it), and report records
+parked in quarantine awaiting a human (report only: it never supersedes, drops, merges or un-parks anything itself) |
 | `./sleep.py doctor --stale <value>` | Show which approved records still hold a stale value (e.g. a changed URL) |
 | `./sleep.py doctor --contradictions` | Ask a model to adjudicate shortlisted pairs of provisional records for conflicts (`--budget`, default $0.25); report-only, and each finding carries the `supersede <older> <newer>` command to run |
 | `./sleep.py doctor --contradictions --tier t2` | Adjudicate pairs of **approved** permanent memory instead of candidates (`--tier both` does both); a T2 finding is labelled `contradicting-memory` and carries the `demote <older>` command, because approved memory is un-approved, never superseded |

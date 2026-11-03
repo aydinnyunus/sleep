@@ -24,12 +24,54 @@ def pending_dir() -> str:
     return d
 
 
-def _fmt_buffer(records: list[dict], limit: int = 120) -> str:
+# The window one consolidation pass is shown. It is a display limit, not a policy:
+# whatever falls below it is NOT read by the pass and NOT pruned, and until 0.8.18
+# nothing said so. BUFFER_WINDOW is now named in one place so the count of records
+# left outside the window can be reported instead of being inferred from len().
+BUFFER_WINDOW = 120
+
+
+def _fmt_buffer(records: list[dict], limit: int = BUFFER_WINDOW) -> str:
     lines = []
     for r in records[-limit:]:
         lines.append("- [%s|%s] %s" % (r.get("kind", "fact"), r.get("source", "?"),
                                        r.get("text", "").replace("\n", " ")))
     return "\n".join(lines)
+
+
+def _window_split(records: list) -> tuple:
+    """(sent, skipped): records inside the format window and those left outside it.
+
+    Only the newest BUFFER_WINDOW records are shown to the model, so a record with an
+    older ts is never read by any pass and never pruned (prune only runs on records the
+    pass consumed). One distinct session arriving with more than a window's worth of
+    captures would therefore be silently dropped from consolidation. The caller reports
+    the skipped count so that possibility is visible instead of invisible.
+    """
+    if len(records) <= BUFFER_WINDOW:
+        return list(records), []
+    return list(records[-BUFFER_WINDOW:]), list(records[:-BUFFER_WINDOW])
+
+
+def _warn_field(skipped: int, total: int) -> dict:
+    """{"warn": sentence} when records were left out, {} when none were.
+
+    A key that is always present but sometimes empty makes every caller test the value;
+    absent-when-there-is-nothing-to-say keeps `"warn" not in result` meaningful.
+    """
+    return {"warn": _window_warning(skipped, total)} if skipped > 0 else {}
+
+
+def _window_warning(skipped: int, total: int) -> str:
+    """One sentence for both paths that can leave records outside the window.
+
+    Shared so `--dry-run` and `--sleep` cannot drift: a preview that says nothing while
+    the real pass warns is worse than no preview.
+    """
+    if skipped <= 0:
+        return ""
+    return ("%d of %d buffer records fell outside the %d-record window and were "
+            "not read or pruned" % (skipped, total, BUFFER_WINDOW))
 
 
 def existing_pool() -> str:
@@ -146,8 +188,11 @@ def distill(session: str | None = None, model: str | None = None,
         return {"ok": True, "reason": "buffer empty", "proposals": 0, "accepted": 0,
                 "consumed": False}
     projects, unaddressed = _project_groups(recs)
+    _sent, outside_window = _window_split(recs)
     if dry_run:
         return {"ok": True, "dry_run": True, "buffer_records": len(recs),
+                "outside_window": len(outside_window),
+                **_warn_field(len(outside_window), len(recs)),
                 "projects": [o for o, _ in projects], "unaddressed": len(unaddressed),
                 "would_send": _fmt_buffer(recs)[:2000]}
     if not projects:
@@ -183,6 +228,11 @@ def distill(session: str | None = None, model: str | None = None,
             ing["ok"] = False
     ing["buffer_records"] = len(recs)
     ing["unaddressed"] = len(unaddressed)
+    # Records the pass was never shown. Not an error and not a bug on its own; the point
+    # is that a night which leaves any behind says so, because "proposals: 2" on a
+    # 300-record buffer reads as a complete pass and is not one.
+    ing["outside_window"] = len(outside_window)
+    ing.update(_warn_field(len(outside_window), len(recs)))
     # "consumed" is what entitles a sleep to prune: the pass produced proposals.
     # Unaddressed records were never read by any pass, so they must not be pruned.
     return ing
@@ -427,7 +477,8 @@ def run_sleep(session=None, model=None, budget_usd=1.0, min_records=3,
         state["last_sleep"] = paths.now()
         state["sleep_count"] = int(state.get("sleep_count", 0)) + 1
         state["last_sleep_result"] = {k: result.get(k) for k in
-                                      ("proposals", "accepted", "refused", "llm_exit")}
+                                      ("proposals", "accepted", "refused", "llm_exit",
+                                       "buffer_records", "outside_window")}
         paths.write_state(state)
         # Synaptic pruning only after a consolidation that actually produced
         # proposals. Pruning a buffer the model never read would silently discard
