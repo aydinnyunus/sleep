@@ -275,7 +275,7 @@ A dream pass performs four steps:
 
 1. **Mine.** Find instructions you repeated across separate sessions in the same project. This step is deterministic and makes no model call.
 2. **Consolidate.** When the sleep gate passes, ask the configured model to turn recent T0 observations into provisional T1 candidates.
-3. **Hygiene.** Run the read-only `doctor` scan and fold any findings (duplicate headings, near-duplicate or contradicting candidates, records parked in quarantine awaiting review, or stale values when you pass `--stale <value>`) into the night's report.
+3. **Hygiene.** Run the read-only `doctor` scan and fold any findings (duplicate headings, near-duplicate or contradicting candidates, broken supersede links, records parked in quarantine awaiting review, or stale values when you pass `--stale <value>`) into the night's report.
 4. **Replay.** When replay is due, run selected tasks with provisional memory off and on, then write a comparison report.
 
 Every result stays reviewable. Candidates remain in T1 until you explicitly run `promote`.
@@ -319,7 +319,7 @@ Run the two dream components separately when you want more control:
 | `./sleep.py replay --run --limit 3` | Compare selected tasks with memory off and on |
 | `./sleep.py mine --dry-run` | Find preferences repeated across sessions |
 | `./sleep.py nightly --dry-run` | Preview the unattended nightly workflow |
-| `./sleep.py doctor` | Find duplicate or overlapping memory records, flag contradicting candidates (same subject, one side carries a correction marker) and print the `supersede <older> <newer>` command to run, flag provisional candidates not rediscovered for 4+ weeks, and report records parked in quarantine awaiting a human (report only: it never supersedes, drops, merges or un-parks anything itself) |
+| `./sleep.py doctor` | Find duplicate or overlapping memory records, flag contradicting candidates (same subject, one side carries a correction marker) and print the `supersede <older> <newer>` command to run, flag provisional candidates not rediscovered for 4+ weeks, flag supersede pointers that name a record no longer in the store, and report records parked in quarantine awaiting a human (report only: it never supersedes, drops, merges or un-parks anything itself) |
 | `./sleep.py doctor --stale <value>` | Show which approved records still hold a stale value (e.g. a changed URL) |
 | `./sleep.py doctor --contradictions` | Ask a model to adjudicate shortlisted pairs of provisional records for conflicts (`--budget`, default $0.25); report-only, and each finding carries the `supersede <older> <newer>` command to run |
 
