@@ -34,6 +34,11 @@ Sleep adds a reviewable memory cycle to nine selectable coding-agent targets. It
 - **Project isolation.** A project's provisional memory is injected only into that project.
 - **Reviewable permanence.** Each approved memory in your index carries its review date and source, so you can tell when a saved instruction was pinned.
 - **Relevance-ranked injection.** With a query, provisional memory is ordered by overlap with the live request and each line carries its age, so the most relevant record survives the `--max` cut and stale facts read as stale.
+- **Two clocks per record.** `ts` is when the record was written; `event_at` is when
+  the thing it describes actually happened, and it is written **only when the record
+  states a date** (a date equal to the capture day is not a second clock). An empty
+  `event_at` means the record does not say, never a guess, so `show` can answer
+  "when was this true" without inventing an event time.
 - **Tagged records.** Consolidation writes 1-4 lowercase topic tags per record (`deploy|aws`),
   normalized and capped in `store`, and `inject --topic` selects on them. A tag is a
   hint a model proposed, so a wrong tag costs a missing filter hit, never a wrong fact.
