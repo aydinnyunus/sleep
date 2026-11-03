@@ -34,6 +34,7 @@ Sleep adds a reviewable memory cycle to nine selectable coding-agent targets. It
 - **Project isolation.** A project's provisional memory is injected only into that project.
 - **Reviewable permanence.** Each approved memory in your index carries its review date and source, so you can tell when a saved instruction was pinned.
 - **Relevance-ranked injection.** With a query, provisional memory is ordered by overlap with the live request and each line carries its age, so the most relevant record survives the `--max` cut and stale facts read as stale.
+- **Indexed by default.** A long observation is injected as its opening claim plus a pointer (`[+714 chars: sleep.py show <id>]`) instead of its whole narrative; `inject --full` prints the complete bodies. Measured on a live pool of 11 records: 5581 -> 3377 characters per injection.
 - **Stale-value scan.** `doctor --stale <value>` finds which approved records still hold a value you know has changed (for example a deployment URL). Unreviewed provisional candidates are also flagged: a fact the agent proposed once and never rediscovered for 4+ weeks keeps getting injected into every session's context, so `doctor` surfaces it as `stale-candidate-unrediscovered` (a report line it never acts on, nothing is dropped).
 - **Safety gates.** Secrets are redacted, hostile text is quarantined, and machine-generated prompts cannot claim user provenance.
 
@@ -335,6 +336,7 @@ name: it routes through its own config, so only `SLEEP_MODEL` reaches it.
 | `./sleep.py supersede <old> <new>` | Mark `<old>` invalid as of now and `<new>` valid as of now (`valid_until` / `valid_from`), so the window a memory was true is readable from the files |
 | `./sleep.py inject --project "$PWD"` | Print provisional context for the current project, newest first, each line dated |
 | `./sleep.py inject --project "$PWD" --query "..."` | Same, but rank records by overlap with the live request so the most relevant survive `--max` |
+| `./sleep.py inject --project "$PWD" --full` | Print each record's whole body instead of the index line |
 
 Run `./sleep.py <command> --help` for command-specific options.
 
