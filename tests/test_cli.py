@@ -180,7 +180,7 @@ class Sandbox(unittest.TestCase):
     # --------------------------------------------------------------- fixtures --
     def seed_candidate(self, cid, body, source="user", trust="verified", kind="fact",
                        status="provisional", cwd=None, session="seed",
-                       ts="2026-01-01T00:00:00+0300"):
+                       ts="2026-01-01T00:00:00+0300", tags=None):
         """Write one T1 file by hand.
 
         Candidates are normally produced by `distill`, and distill is a model call,
@@ -191,7 +191,8 @@ class Sandbox(unittest.TestCase):
         """
         meta = [("id", cid), ("ts", ts), ("source", source),
                 ("trust", trust), ("kind", kind), ("status", status),
-                ("session", session), ("cwd", cwd or self.proj_a), ("tags", ""),
+                ("session", session), ("cwd", cwd or self.proj_a),
+                ("tags", "|".join(tags or [])),
                 ("evidence", ""), ("supersedes", ""), ("superseded_by", ""),
                 ("redacted", "false"), ("notes", "")]
         text = "---\n" + "".join("%s: %s\n" % pair for pair in meta) + "---\n" + body + "\n"
@@ -578,6 +579,29 @@ class StatusShowInject(Sandbox):
         got = self.cli("inject", "--project", self.proj_a, "--max", "1")
         self.assertIn("read_api scope.", got.stdout)
         self.assertNotIn("sleep.py show cshort", got.stdout)
+
+    def test_inject_topic_selects_by_tag_and_never_by_body_wording(self):
+        """A topic filter is an index lookup, not a keyword search: a record whose TAG
+        carries the topic is selected even when its wording does not, and a record whose
+        body merely mentions the word is not, because --query already covers that."""
+        self.seed_candidate("ctag", "The staging host moved to venus.internal.",
+                            cwd=self.proj_a, tags=["deploy", "aws"])
+        self.seed_candidate("cbody", "Wrote a note about the deploy pipeline while reading.",
+                            cwd=self.proj_a)
+        got = self.cli("inject", "--project", self.proj_a, "--topic", "deploy")
+        self.assertEqual(got.returncode, 0, got.stderr)
+        self.assertIn("venus.internal", got.stdout)
+        self.assertNotIn("Wrote a note", got.stdout,
+                         "a body mention is not a tag and must not select the record")
+        # case-insensitive and substring in both directions
+        self.assertIn("venus.internal",
+                      self.cli("inject", "--project", self.proj_a, "--topic", "DEPLOY").stdout)
+        self.assertIn("venus.internal",
+                      self.cli("inject", "--project", self.proj_a, "--topic", "deployments").stdout)
+        # a record with no tags can never match a topic
+        self.assertEqual(self.cli("inject", "--project", self.proj_a, "--topic", "deployments").returncode, 0)
+        untagged = self.cli("inject", "--project", self.proj_a, "--topic", "note")
+        self.assertEqual(untagged.stdout.strip(), "")
 
     def test_inject_keeps_user_confirmed_targets_unmasked(self):
         # source=user + trust=verified is the human's own confirmed words: it may

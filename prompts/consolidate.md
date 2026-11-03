@@ -18,6 +18,7 @@ Each proposal is header fields, a blank line, then the observation:
     source: user | agent | inferred
     kind: fact | preference | procedure | warning
     trust: verified | observed | speculative
+    tags: <1-4 pipe-separated lowercase topics, e.g. deploy|aws or gitlab|auth>
     evidence: <optional, comma separated file paths or session refs>
 
     <one observation, 1-3 sentences, written so a reader in a future session can
@@ -52,5 +53,8 @@ here.
 
 - You have read access only, and you do not need it: the buffer and the existing
   pool are already in your prompt. Do not run commands.
+- The `tags` line is the only index a future session can filter on: use the
+  topic words a person would search for (deploy, gitlab, auth), not the
+  sentence's verbs. Never repeat the kind as a tag.
 - Proposals are cheap and refusals are cheap; a poisoned memory store is not. When
   in doubt, emit fewer and mark the remainder `speculative`.

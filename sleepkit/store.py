@@ -324,7 +324,7 @@ def record_injection(ids: list[str]) -> int:
 def add_candidate(text: str, kind: str = "fact", source: str = "agent",
                   trust: str = "observed", session: str = "", cwd: str = "",
                   evidence: list[str] | None = None, supersedes: list[str] | None = None,
-                  notes: str = "") -> tuple[bool, str]:
+                  notes: str = "", tags: list[str] | None = None) -> tuple[bool, str]:
     """T1: distilled, provisional. Never injected as a directive."""
     text = (text or "").strip()
     if not text:
@@ -369,7 +369,7 @@ def add_candidate(text: str, kind: str = "fact", source: str = "agent",
         "status": "provisional",
         "session": session or os.environ.get("SLEEP_SESSION", ""),
         "cwd": cwd or os.getcwd(),
-        "tags": "|".join([]),
+        "tags": "|".join(_clean_tags(tags)),
         "evidence": "|".join(evidence or []),
         "supersedes": "|".join(supersedes or []),
         "superseded_by": "",
@@ -815,6 +815,42 @@ def prune_buffer(older_than_hours: float = 0.0, session: str | None = None) -> d
         shutil.move(p, dest)
         moved.append(dest)
     return {"moved": moved, "remaining": buffer_counts()}
+
+
+# Tags are the only index a record carries besides its project, so they are kept
+# machine-shaped: lowercase, no spaces, bounded in number and length. A model may
+# propose them, which is exactly why they are normalized here rather than trusted.
+MAX_TAGS = 6
+MAX_TAG_CHARS = 32
+
+
+def _clean_tags(tags) -> list:
+    out, seen = [], set()
+    for raw in tags or []:
+        tag = re.sub(r"[^a-z0-9._:+-]+", "-", str(raw).strip().lower()).strip("-")
+        if not tag or tag in seen:
+            continue
+        seen.add(tag)
+        out.append(tag[:MAX_TAG_CHARS])
+        if len(out) >= MAX_TAGS:
+            break
+    return out
+
+
+def matches_topic(meta: dict, topic: str) -> bool:
+    """True when a record carries the topic as one of its tags (substring, either way).
+
+    Deliberately tag-only: matching the body would turn a topic filter into a keyword
+    search, which is what --query already does. Substring in both directions so
+    `deploy` selects `deploy` and `deployment`, not `predeployed`."""
+    want = str(topic or "").strip().lower()
+    if not want:
+        return True
+    for tag in meta.get("tags") or []:
+        tag = str(tag).strip().lower()
+        if want == tag or want in tag or tag in want:
+            return True
+    return False
 
 
 # A cheap pre-filter for the LLM adjudicator. Token Jaccard is a poor *decider* on

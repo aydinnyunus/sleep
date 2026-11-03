@@ -535,8 +535,10 @@ def _index_line(body: str, cid: str) -> str:
 
 def cmd_inject(a) -> int:
     """Print the provisional-memory block for a session's context. Framed as context."""
+    topic = getattr(a, "topic", "") or ""
     pool = [c for c in store.list_candidates(status="provisional", with_body=True)
-            if _within_project(c.get("cwd", ""), a.project)]
+            if _within_project(c.get("cwd", ""), a.project)
+            and store.matches_topic(c, topic)]
     full = bool(getattr(a, "full", False))
     recs = []
     served = []
@@ -721,6 +723,9 @@ def main(argv=None) -> int:
     ij.add_argument("--query", default="",
                     help="rank provisional records by overlap with this text "
                          "(the live request); newest first when omitted")
+    ij.add_argument("--topic", default="",
+                    help="only records tagged with this topic (matches the record's "
+                         "tags field; records with no tags never match)")
     ij.add_argument("--full", action="store_true",
                     help="print each record's whole body instead of the index line")
     ij.set_defaults(fn=cmd_inject)

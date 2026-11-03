@@ -15,7 +15,7 @@ from datetime import datetime
 
 from . import llm, paths, safety, store
 
-_HDR = re.compile(r"^(source|kind|trust|evidence)\s*:\s*(.+)$", re.M)
+_HDR = re.compile(r"^(source|kind|trust|tags|evidence)\s*:\s*(.+)$", re.M)
 
 
 def pending_dir() -> str:
@@ -190,7 +190,8 @@ def distill(session: str | None = None, model: str | None = None,
 
 def parse_proposal(text: str) -> dict:
     """Split one proposal into header fields + body. Headers are optional."""
-    fields = {"source": "agent", "kind": "fact", "trust": "observed", "evidence": ""}
+    fields = {"source": "agent", "kind": "fact", "trust": "observed",
+              "tags": "", "evidence": ""}
     for m in _HDR.finditer(text):
         fields[m.group(1)] = m.group(2).strip()
     body = _HDR.sub("", text).strip()
@@ -204,7 +205,7 @@ def parse_proposal(text: str) -> dict:
 # fallback. Neither decides what becomes memory: every block still goes through
 # ingest_records(), which is where the gates live.
 _SEP_LINE = re.compile(r"^[^A-Za-z0-9\n]*PROPOSAL[^A-Za-z0-9\n]*$", re.I | re.M)
-_HDR_LINE = re.compile(r"^(source|kind|trust|evidence)\s*:.*$", re.M)
+_HDR_LINE = re.compile(r"^(source|kind|trust|tags|evidence)\s*:.*$", re.M)
 
 
 def split_blocks(text: str) -> tuple:
@@ -306,7 +307,10 @@ def ingest_records(parsed: list, session: str = "", cwd: str = "",
             item["body"], kind=f.get("kind", "fact"), source=source, trust=trust,
             session=session or os.environ.get("SLEEP_SESSION", ""),
             cwd=cwd or os.getcwd(),
-            evidence=[x for x in f.get("evidence", "").split(",") if x])
+            evidence=[x for x in f.get("evidence", "").split(",") if x],
+            # The proposal's own tag line is a hint, never authority: store.add_candidate
+            # normalizes and caps it, and a wrong tag only costs a bad topic filter.
+            tags=[x for x in str(f.get("tags", "")).split("|") if x.strip()])
         (accepted if ok else refused).append({"body": item["body"][:60], "result": out})
     return {"proposals": len(parsed), "accepted": len(accepted), "refused": refused,
             "accepted_ids": [a["result"] for a in accepted]}
