@@ -1326,19 +1326,66 @@ class HookBoundary(Sandbox):
         rec = self.buffer_records()[-1]
         self.assertEqual(rec["source"], "agent", "a tool event is never the user's own words")
         self.assertEqual(rec["tags"], "hook:posttool")
-        self.assertEqual(rec["evidence"], touched)
+        self.assertEqual(rec["evidence"], "%s|Read ok" % touched,
+                         "the path stays, and the tool plus its outcome is added to it")
         self.assertEqual(rec["cwd"], self.proj_b)
 
-    def test_a_pathless_tool_event_is_counted_but_never_captured(self):
+    def test_a_pathless_tool_event_records_the_tool_and_its_outcome(self):
+        """A command-shaped call (Bash, Grep) carries no file path, and this used to be
+        dropped outright. Dropping it meant the failure that produced a wrong "fact"
+        left no trace at all: neither which tool ran nor whether it worked. The tool and
+        its outcome are the whole content of such an event, so they are what is kept -
+        and the record still carries no path, because there is none to claim."""
         self.cli("status")
         payload = json.dumps({"session_id": "h3", "cwd": self.proj_a, "tool_name": "bash",
-                              "tool_input": {"command": "ls"}})
+                              "tool_input": {"command": "ls"},
+                              "tool_response": {"stdout": "ok", "is_error": False}})
         got = self.bash(os.path.join(HOOKS, "sleep-posttool.sh"), stdin=payload)
         self.assertEqual(got.returncode, 0, got.stderr)
-        self.assertEqual(self.buffer_records(), [])
+        rec = self.buffer_records()[-1]
+        self.assertEqual(rec["source"], "agent", "a tool event is never the user's own words")
+        self.assertEqual(rec["evidence"], "bash ok")
+        self.assertNotIn(self.proj_a, rec["evidence"], "no path may be invented")
         log = self.read(os.path.join(self.sleep_home, "logs", "hook-fires.log"))
         self.assertIn("posttool", log)
         self.assertIn("bytes=", log)
+
+    def test_a_failed_tool_call_is_recorded_as_failed(self):
+        """The outcome is the point: a fact that came out of a failed command is the
+        kind of memory that should never be trusted, and today nothing recorded it."""
+        self.cli("status")
+        payload = json.dumps({"session_id": "h4", "cwd": self.proj_a, "tool_name": "Bash",
+                              "tool_input": {"command": "nope --bad"},
+                              "tool_response": {"stdout": "", "stderr": "command not found",
+                                                "is_error": True}})
+        got = self.bash(os.path.join(HOOKS, "sleep-posttool.sh"), stdin=payload)
+        self.assertEqual(got.returncode, 0, got.stderr)
+        rec = self.buffer_records()[-1]
+        self.assertEqual(rec["evidence"], "Bash failed")
+
+    def test_a_tool_call_without_an_error_signal_is_recorded_as_ok(self):
+        """Claude does not always stamp success. A PostToolUse event is delivered for a
+        call that ran, so the weaker true statement is 'ok' - never a failure we cannot
+        actually see."""
+        self.cli("status")
+        payload = json.dumps({"session_id": "h5", "cwd": self.proj_a, "tool_name": "Read",
+                              "tool_input": {"file_path": os.path.join(self.proj_a, "x.py")},
+                              "tool_response": {"file": {"content": "x"}}})
+        got = self.bash(os.path.join(HOOKS, "sleep-posttool.sh"), stdin=payload)
+        self.assertEqual(got.returncode, 0, got.stderr)
+        rec = self.buffer_records()[-1]
+        self.assertIn("Read ok", rec["evidence"])
+        self.assertEqual(rec["text"], "session touched %s via Read (ok)"
+                         % os.path.join(self.proj_a, "x.py"))
+
+    def test_an_interrupted_tool_call_is_recorded_as_failed(self):
+        self.cli("status")
+        payload = json.dumps({"session_id": "h6", "cwd": self.proj_a, "tool_name": "Edit",
+                              "tool_input": {"file_path": os.path.join(self.proj_a, "y.py")},
+                              "tool_response": {"interrupted": True}})
+        got = self.bash(os.path.join(HOOKS, "sleep-posttool.sh"), stdin=payload)
+        self.assertEqual(got.returncode, 0, got.stderr)
+        self.assertIn("Edit failed", self.buffer_records()[-1]["evidence"])
 
 
 class WireProfile(Sandbox):

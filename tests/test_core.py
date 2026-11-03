@@ -587,12 +587,14 @@ class T(unittest.TestCase):
         self.assertEqual(rec["source"], "agent")
         self.assertIn("/tmp/a.py", rec["evidence"])
 
-    def test_hook_fire_is_counted_even_when_the_event_is_ignored(self):
-        """A path-less tool event must still prove the hook ran.
+    def test_hook_fire_is_counted_for_a_pathless_tool_event(self):
+        """A path-less tool event must both prove the hook ran and be kept.
 
         On this box the buffer stayed empty across ~30 path-less tool calls, and
         with no fire log that is indistinguishable from a hook that never fired -
-        which is exactly the wrong conclusion this test blocks.
+        which is the conclusion this test blocks. The same events are now recorded
+        as tool+outcome (they carry no path, so none is claimed); the fire log is
+        still the proof that the hook itself ran.
         """
         import io
         from sleepkit import hookio
@@ -605,8 +607,8 @@ class T(unittest.TestCase):
         payload = json.dumps({"session_id": "h9", "cwd": "/tmp", "tool_name": "bash",
                               "tool_input": {"command": "ls"}})
         outcome, detail = hookio.capture_tool_from_stdin(io.StringIO(payload))
-        self.assertEqual(outcome, "ignored")
-        self.assertIn("no path", detail)
+        self.assertEqual(outcome, "captured")
+        self.assertNotIn("no path", detail)
         with open(log, encoding="utf-8") as fh:
             after = fh.read()
         self.assertGreater(len(after), len(before))

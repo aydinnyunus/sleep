@@ -110,6 +110,28 @@ def capture_from_stdin(stdin=None, kind: str = "preference",
 _PATH_KEYS = ("file_path", "path", "notebook_path", "filePath")
 
 
+def tool_outcome(payload: dict) -> str:
+    """'ok' or 'failed' for a finished tool call.
+
+    Claude reports a failed call on the response (`is_error`) and on the process
+    (`interrupted`); an explicit success flag is trusted when present. When the
+    payload carries neither signal the answer is "ok", because a PostToolUse event
+    is delivered for a call that ran, and claiming a failure we cannot see would be
+    worse than the weaker true statement.
+    """
+    resp = payload.get("tool_response") or payload.get("toolResponse") or {}
+    if isinstance(resp, dict):
+        if resp.get("is_error") or resp.get("isError"):
+            return "failed"
+        if resp.get("interrupted"):
+            return "failed"
+        if resp.get("success") is False:
+            return "failed"
+    if payload.get("is_error") or payload.get("isError"):
+        return "failed"
+    return "ok"
+
+
 def tool_event(payload: dict) -> tuple[str, str]:
     """(tool_name, path) from a PostToolUse payload, or ("", "")."""
     name = str(payload.get("tool_name") or payload.get("toolName") or "")
@@ -135,13 +157,21 @@ def capture_tool_from_stdin(stdin=None) -> tuple[str, str]:
     if not isinstance(payload, dict):
         return "ignored", "hook payload not an object"
     name, path = tool_event(payload)
-    if not path:
-        return "ignored", "no path in tool event"
-    text = "session touched %s via %s" % (path, name or "tool")
+    tool = name or "tool"
+    outcome = tool_outcome(payload)
+    # A call without a path (Bash, Grep, and every command-shaped tool) still says
+    # something worth keeping: which tool ran and whether it worked. Dropping those
+    # events meant the failure that produced a wrong "fact" left no trace at all.
+    if path:
+        text = "session touched %s via %s (%s)" % (path, tool, outcome)
+        evidence = [path, "%s %s" % (tool, outcome)]
+    else:
+        text = "session ran %s (%s)" % (tool, outcome)
+        evidence = ["%s %s" % (tool, outcome)]
     ok, detail = store.capture(text, kind="fact", source="agent",
                                session=str(payload.get("session_id") or ""),
                                cwd=str(payload.get("cwd") or ""),
-                               evidence=[path], tags=["hook:posttool"])
+                               evidence=evidence, tags=["hook:posttool"])
     return ("captured" if ok else "refused"), detail
 
 
