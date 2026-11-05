@@ -212,6 +212,10 @@ def uninstall():
         plist = os.path.join(os.path.expanduser("~"), "Library", "LaunchAgents",
                              "com.aydinnyunus.sleep-nightly.plist")
         if os.path.exists(plist):
+            # bootout, not `unload <path>`: unload can report success while the job
+            # launchd is running under a different path survives (measured 2026-11-05,
+            # a plist that `load` accepted and never registered).
+            run(["launchctl", "bootout", "gui/%d" % os.getuid()])
             run(["launchctl", "unload", plist])
             run(["rm", "-f", plist])
             print(("  would: unload + remove LaunchAgent" if not RUN else "  unloaded + removed LaunchAgent"))

@@ -432,15 +432,58 @@ def scheduler_mac(nightly: bool):
         return
     # launchctl registers in the logged-in user's domain; HOME redirection does not move it.
     if home_is_real():
-        subprocess.run(["launchctl", "unload", dst], capture_output=True)
-        r = subprocess.run(["launchctl", "load", dst], capture_output=True, text=True)
-        if r.returncode != 0:
-            print("  launchctl load returned %s: %s" % (r.returncode, r.stderr.strip()))
-        else:
+        if load_launchd(dst):
             print("  loaded %s" % dst)
     else:
         print("  rendered %s, NOT loaded: HOME (%s) is not the real home." % (dst, os.getenv("HOME")))
-        print("  launchctl load \"%s\"" % dst)
+        print("  launchctl bootstrap gui/%d \"%s\"" % (os.getuid(), dst))
+
+
+def launchd_domain() -> str:
+    """The domain a per-user agent belongs to: gui/<uid> for a logged-in user.
+
+    `launchctl load <path>` predates this and reports success on a job macOS then
+    never runs, which is how a plist can sit in LaunchAgents for four days with a
+    schedule in it and no fire: measured on 2026-11-05, `launchctl list` showed no
+    com.aydinnyunus.sleep-nightly after an install that printed "loaded".
+    """
+    return "gui/%d" % os.getuid()
+
+
+def launchd_loaded(label: str) -> bool:
+    """True when launchd actually holds a job by this label in this user's domain."""
+    r = subprocess.run(["launchctl", "print", "%s/%s" % (launchd_domain(), label)],
+                       capture_output=True, text=True)
+    return r.returncode == 0
+
+
+def load_launchd(dst: str) -> bool:
+    """Register a LaunchAgent and verify launchd took it. Returns True when loaded.
+
+    bootstrap is not idempotent: over an already-loaded label it fails with EEXIST, so
+    bootout first, then enable (a label a previous run disabled stays disabled across
+    an install, and the job would then exist but never fire), then bootstrap, then
+    read the job back. A load that is not read back is a load we cannot claim.
+    """
+    import plistlib
+    try:
+        label = plistlib.loads(open(dst, "rb").read()).get("Label", "")
+    except Exception as exc:
+        print("  cannot read the rendered plist's Label: %s" % exc)
+        return False
+    domain = launchd_domain()
+    if label and launchd_loaded(label):
+        subprocess.run(["launchctl", "bootout", "%s/%s" % (domain, label)], capture_output=True)
+    loaded = subprocess.run(["launchctl", "bootstrap", domain, dst], capture_output=True, text=True)
+    if loaded.returncode != 0:
+        print("  launchctl bootstrap returned %s: %s" % (loaded.returncode, loaded.stderr.strip()))
+        return False
+    if label:
+        subprocess.run(["launchctl", "enable", "%s/%s" % (domain, label)], capture_output=True)
+        if not launchd_loaded(label):
+            print("  launchctl bootstrap reported success but %s is not in %s" % (label, domain))
+            return False
+    return True
     if not os.path.isfile(os.path.join(SLEEP_HOME, "env")):
         print("  note: %s/env is absent. If the model needs a login token," % SLEEP_HOME)
         print("        write KEY=VALUE lines there and chmod 600; the nightly reads it.")

@@ -2196,6 +2196,82 @@ class InstallUninstall(Sandbox):
         self.assertEqual(got.returncode, 0, got.stdout + got.stderr)
         self.assertEqual(self.read(state), "17 2 * * * /usr/bin/echo foreign\n")
 
+    def test_mac_scheduler_bootstraps_the_agent_and_reads_it_back(self):
+        """An install must know launchd took the job, not just that it asked.
+
+        `launchctl load <path>` reports success on a job macOS then never runs, and that
+        is not a theory: measured on 2026-11-05, a plist installed on 2026-11-01 sat in
+        LaunchAgents with a 03:41 schedule and `launchctl list` did not carry its label,
+        so four nights passed with no fire while the installer had printed "loaded".
+        The fake launchctl below holds its jobs in a state file, so the read-back is a
+        real check of the second call rather than a restatement of the first.
+        """
+        state = self.write(self.at("launchd-state.txt"), "")
+        # `launchctl bootstrap <domain> <path>` puts the plist in $3, while `print` and
+        # `bootout` take "<domain>/<label>" in $2 - two argument shapes in one fake, and
+        # reading the label from $2 is the bug this comment exists to prevent.
+        self._make_script("launchctl", (
+            '#!/bin/sh\n'
+            'case "$1" in\n'
+            '  bootstrap) label=$(/usr/bin/sed -n "s/.*<key>Label<\\/key><string>\\([^<]*\\)<\\/string>.*/\\1/p" "$3"); \n'
+            '             echo "$label" >> "$LAUNCHD_STATE"; exit 0;;\n'
+            '  print) shift; grep -qx "${1##*/}" "$LAUNCHD_STATE"; exit $?;;\n'
+            '  bootout) label="${1##*/}"; grep -vx "$label" "$LAUNCHD_STATE" > "$LAUNCHD_STATE.tmp"; \n'
+            '           mv "$LAUNCHD_STATE.tmp" "$LAUNCHD_STATE"; exit 0;;\n'
+            '  enable) exit 0;;\n'
+            'esac\nexit 2\n'))
+        code = (
+            "import sys; sys.path.insert(0,sys.argv[1]); import install; "
+            "install.RUN=True; install.SLEEP_HOME=sys.argv[2]; "
+            # The sandbox HOME is not the real one, and home_is_real() is what keeps a
+            # redirected install from registering a launchd job in the developer's own
+            # domain. Pin it True: this test is about what happens AFTER that guard
+            # passes, and the fake launchctl in PATH is the thing being measured.
+            "install.home_is_real=lambda: True; "
+            "assert install.scheduler_mac(True) is None; "
+            "assert install.launchd_loaded('com.aydinnyunus.sleep-nightly'), "
+            "'bootstrap must be read back before an install calls itself done'"
+        )
+        got = self._run([PY, "-c", code, os.path.join(REPO, "tools"), self.sleep_home],
+                        stdin="", cwd=REPO, env=self.env(LAUNCHD_STATE=state))
+        self.assertEqual(got.returncode, 0, got.stdout + got.stderr)
+        self.assertIn("loaded", got.stdout)
+        self.assertIn("com.aydinnyunus.sleep-nightly", self.read(state))
+        plist = os.path.join(self.home, "Library", "LaunchAgents",
+                             "com.aydinnyunus.sleep-nightly.plist")
+        with open(plist, "rb") as handle:
+            doc = plistlib.loads(handle.read())
+        self.assertEqual(doc["StartCalendarInterval"], {"Hour": 3, "Minute": 41})
+
+    def test_mac_scheduler_reports_a_bootstrap_that_registers_nothing(self):
+        """A bootstrap that returns 0 without registering the label is a failure.
+
+        The install must not print "loaded" on the strength of an exit code, because a
+        read-back is the only thing that separates a registered job from a plist on
+        disk, and the difference is four silent nights.
+        """
+        state = self.write(self.at("launchd-state.txt"), "")
+        self._make_script("launchctl", (
+            '#!/bin/sh\n'
+            'case "$1" in\n'
+            '  bootstrap) exit 0;;\n'
+            '  print) exit 1;;\n'
+            '  bootout|enable) exit 0;;\n'
+            'esac\nexit 2\n'))
+        code = (
+            "import sys; sys.path.insert(0,sys.argv[1]); import install; "
+            "install.RUN=True; install.SLEEP_HOME=sys.argv[2]; "
+            "install.home_is_real=lambda: True; "
+            "assert install.scheduler_mac(True) is None; "
+            "assert not install.launchd_loaded('com.aydinnyunus.sleep-nightly')"
+        )
+        got = self._run([PY, "-c", code, os.path.join(REPO, "tools"), self.sleep_home],
+                        stdin="", cwd=REPO, env=self.env(LAUNCHD_STATE=state))
+        self.assertEqual(got.returncode, 0, got.stdout + got.stderr)
+        self.assertNotIn("  loaded ", got.stdout,
+                         "an install must not print 'loaded' for a job launchd does not hold")
+        self.assertIn("is not in", got.stdout)
+
     def test_linux_cron_refuses_an_unterminated_owned_block(self):
         original = ("# BEGIN aydinnyunus-sleep-nightly\n"
                     "3 41 * * * /old/sleep.py nightly\n"

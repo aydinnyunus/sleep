@@ -163,7 +163,7 @@ entries, and backs up JSON/TOML files before changing them. It is one Python
 script and works on macOS, Linux, and Windows; per-platform scheduling is chosen
 automatically:
 
-- **macOS** - a LaunchAgent (`~/Library/LaunchAgents/com.aydinnyunus.sleep-nightly.plist`).
+- **macOS** - a LaunchAgent (`~/Library/LaunchAgents/com.aydinnyunus.sleep-nightly.plist`), registered with `launchctl bootstrap` and read back with `launchctl print`, so an install that launchd did not take says so instead of printing "loaded".
 - **Linux** - a cron job (`crontab -l`, kept inside owned `# BEGIN/END aydinnyunus-sleep-nightly` markers).
 - **Windows** - a Task Scheduler task via `schtasks /create /tn aydinnyunus-sleep-nightly`.
 

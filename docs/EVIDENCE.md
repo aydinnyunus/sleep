@@ -636,3 +636,65 @@ Pinned by `tests/test_core.py::T` (`test_urgency_weights_come_from_the_table_and
 `test_every_weight_the_doctor_can_emit_is_a_known_row`,
 `test_urgency_waives_the_interval_but_never_the_record_floor`,
 `test_run_sleep_reports_why_it_ran_early`).
+
+
+## 2026-11-05: a scheduled pass that was never scheduled
+
+The nightly pass existed, was installed, and had not run for two nights. The plist was
+present (`~/Library/LaunchAgents/com.aydinnyunus.sleep-nightly.plist`, mtime 2026-11-01
+21:44, `StartCalendarInterval` 03:41, `RunAtLoad` true) and `launchctl list` did not
+carry its label at all. `nightly.log` held exactly two records, `2026-11-01T03:41:05`
+and `2026-11-01T21:44:57`; nothing on 11-02, 11-03, 11-04 or 11-05.
+
+Measured (before the change):
+
+    $ launchctl list | grep aydinnyunus
+    -	0	com.aydinnyunus.claude-curator
+    $ launchctl print gui/502/com.aydinnyunus.sleep-nightly
+    Could not find service ... in domain for user gui: 502
+    $ launchctl print-disabled gui/502 | grep sleep
+    (nothing)
+
+The job was not disabled, it was never registered. `tools/install.py` registered it with
+`launchctl load <path>`, which exits 0 in a case where launchd holds no job: the install
+printed "loaded" and the schedule was inert. A silent install failure is the worst shape
+here, because the only symptom is a night with no output, and a night with no
+consolidation looks exactly like a night where nothing needed consolidating.
+
+The loader now uses `launchctl bootstrap gui/<uid> <path>` and then reads the job back
+with `launchctl print`; `enable` is called after `bootstrap` so a label a previous run
+disabled cannot stay disabled across an install; `bootout` runs first because `bootstrap`
+is not idempotent (EEXIST over a loaded label). The uninstall side now `bootout`s by
+label as well as `unload`ing by path.
+
+Measured (after the change, on this machine, `load_launchd()` called directly):
+
+    load_launchd before: False
+    load_launchd -> True
+    load_launchd after:  True
+
+    $ launchctl print gui/502/com.aydinnyunus.sleep-nightly
+      path = /Users/yunus.aydin/Library/LaunchAgents/com.aydinnyunus.sleep-nightly.plist
+      state = not running
+      runs = 1
+      last exit code = 0
+
+`runs = 1` and `last exit code = 0` are the `RunAtLoad` fire, and it wrote a record into
+`nightly.log` while this was being measured:
+
+    "ts": "2026-11-05T23:59:24+0300"
+    "sleep": {"action": "skipped", "buffer_records": 1,
+              "gate": {"min_interval_hours": 0.0, "min_records": 2, "min_urgency": 2.0,
+                       "urgency": 1,
+                       "urgency_detail": "quarantine-awaiting-review (+1; quarantine-awaiting-review x1)"},
+              "reason": "buffer has 1 record(s), needs 2"}
+
+Two things land in that line: the schedule runs now, and the 0.8.20 gate carries its
+reason into the unattended report (`urgency 1` is below `min_urgency 2`, and the record
+floor refuses regardless).
+
+Pinned by `tests/test_cli.py::InstallUninstall`
+(`test_mac_scheduler_bootstraps_the_agent_and_reads_it_back`,
+`test_mac_scheduler_reports_a_bootstrap_that_registers_nothing`). The fakes hold jobs in
+a state file, so the read-back is a real second call and not a restatement of the first,
+and the second test fails if "loaded" is ever printed on the strength of an exit code.
