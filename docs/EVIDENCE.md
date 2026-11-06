@@ -7,14 +7,12 @@ ever exercised.
 
 ## Ran
 
-**Unit tests.** `python3 -m unittest discover -s tests` -> `Ran 103 tests ... OK`: 44 in-process tests in
-`tests/test_core.py` (hook parsing, the proposal parser, the gate arithmetic, the provenance ceiling,
-redaction, the two tests from the code review, and the answer scorer's six verdict branches) plus 59 in
-`tests/test_cli.py`, where every call is a real
-subprocess of `sleep.py`, `tools/wire.py`, `install.sh` or `uninstall.sh` against a throwaway `$SLEEP_HOME`.
-No test reaches the network or a model. Two of those 103 exist only because of the real `promote` below: one
-asserts a promoted file carries the memory text and not only frontmatter, one asserts the index is copied
-before it is rewritten. Both were checked load-bearing: with the fix removed, each one fails.
+**Unit tests.** `npm run validate` -> `Ran 261 tests ... OK` (plus `ruff` clean and the package
+smoke): 87 in-process tests in `tests/test_core.py` (hook parsing, the proposal parser, the gate arithmetic,
+the provenance ceiling, redaction, the kind-lifetime floor, and the answer scorer's verdict branches) plus 174
+in `tests/test_cli.py`, where every call is a real subprocess of `sleep.py`, `tools/wire.py`, `install.sh` or
+`uninstall.sh` against a throwaway `$SLEEP_HOME`. No test reaches the network or a model. The counts in this
+paragraph are the ones the run above printed; when they disagree with the suite, the suite is right.
 
 **One real sleep cycle, end to end** (`~/.sleep/reports/2026-10-31-163914-replay.md`; the report filename
 format is `<utc>-replay.md`, the `A` in a filename like `...-16A-replay.md` in an older note was my mistake):
@@ -394,6 +392,24 @@ sentinel rule (`print|say|output|return` followed by an uppercase token, anywher
 records and hit sentences that merely mention a constant. End-anchoring it - a probe ends with the token it wants
 back - dropped the count to 17 and, on a hand-built set, kept 6/6 probe phrasings flagged and 4/4 human phrasings
 clean, including `never return MEMORY.md as a raw string, parse it first`.
+
+
+**T2 happened to be the wrong directory, and one env line was a no-op** (2026-11-06). Two defects with the
+same shape: a stored path that nothing checked and a documented key that nothing read. Measured on this laptop:
+
+| claim | measurement |
+|---|---|
+| the project key sleep built was never the one Claude Code builds | sleep's rule kept `.` and `-` (`Users-yunus.aydin-Research-sleep`, no such directory) while the host's own key folded the dot (`-Users-yunus-aydin-Research-sleep`), so resolution fell through to a hard-coded fallback on every call |
+| where T2 actually was | `~/.claude-work/projects/-Users-yunus-aydin/memory`, 107 records, shared with the host's own project memory |
+| a `SLEEP_MEMORY_DIR` line in `~/.sleep/env` | read by nothing that decided a path: `llm.auth_env()` only ever passed the file to `subprocess.run(env=...)`, so `paths.memory_dir()` used its fallback instead |
+| the fixed location after the change | `./sleep.py status` prints `T2 canonical /Users/yunus.aydin/.sleep/memory  (11 permanent records)` |
+| the env line after the change | in a throwaway `SLEEP_HOME`, a `promote` with `SLEEP_MEMORY_DIR` only in the env file wrote `<from-file>/the-staging-gateway-needs-a-ten-minute-timeout.md` and created nothing under the fallback |
+| precedence | the same `promote` with the value exported in the environment used the exported store and never created the file's |
+
+Eleven records that `confirmed_by` or `promoted_at` shows were written by this tool were copied to the new
+store; the old directory was left intact and no file was deleted. `promote` and `demote` already printed the
+path they wrote, which is what makes a pass that lands somewhere unexpected detectable rather than silent.
+
 
 ## Did not run
 

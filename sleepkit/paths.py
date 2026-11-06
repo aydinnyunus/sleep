@@ -60,25 +60,76 @@ def env_file() -> str:
 
 
 # --- memory repo resolution ------------------------------------------------
-# Claude Code convention: project key is the cwd with "/" replaced by "-".
-# The user's long-term memory lives in the repo-level memory dir; we only ever
-# *append* to its index and never rewrite an existing knowledge block.
+# T2 is sleep's own store, not a host's project memory. The host's own store is
+# written under its own rule, and the writer here could not know a store's rule
+# ahead of a switch on an unset var in an env file, so the directory it picked was
+# always the fallback; it also gave one path a store that named another. T2 therefore
+# has one home of its own. It used to be the project memory directory of whichever
+# agent cwd was current, and that directory is NOT written to any more: promote
+# creates its target if it is missing, so the location must not depend on which
+# project a hook happened to run in.
 
-CLAUDE_HOME = os.environ.get("CLAUDE_CONFIG_DIR") or os.path.expanduser("~/.claude-work")
+SLEEP_MEMORY_ENV = "SLEEP_MEMORY_DIR"
+
+
+def memory_dir_home() -> str:
+    return os.path.join(home(), "memory")
+
+
+def memory_dir_env() -> str | None:
+    """The one override that is honoured, read from the process environment (and
+    adopted from the env file by the CLI before any command runs)."""
+    value = (os.environ.get(SLEEP_MEMORY_ENV) or "").strip()
+    return os.path.expanduser(value) if value else None
 
 
 def memory_dir(cwd: str | None = None) -> str:
-    env = os.environ.get("SLEEP_MEMORY_DIR")
+    """Where T2 lives: the override, else sleep's own home, else what already exists.
+
+    ``cwd`` is kept in the signature because callers still pass it, and it stays
+    meaningful only for the last branch: an install that has been running since
+    before this change keeps reading the project memory directory its records
+    actually sit in, instead of one that reads empty and looks like data loss. A
+    directory that has never been written to therefore resolves to sleep's own home
+    and not to a path built from the caller's cwd. Callers that must inspect a
+    *specific* store keep passing it explicitly (store.* all take memory_dir=...).
+    """
+    env = memory_dir_env()
     if env:
-        return os.path.expanduser(env)
-    cwd = cwd or os.getcwd()
-    key = re.sub(r"[^A-Za-z0-9._-]", "-", os.path.abspath(cwd)).strip("-")
-    cand = os.path.join(CLAUDE_HOME, "projects", key, "memory")
-    if os.path.isdir(os.path.dirname(cand)) or os.path.isdir(cand):
-        return cand
-    # Fall back to the global project memory that actually exists on this box.
-    fallback = os.path.join(CLAUDE_HOME, "projects", "-Users-yunus-aydin", "memory")
-    return fallback if os.path.isdir(fallback) else cand
+        return env
+    ours = memory_dir_home()
+    if os.path.isdir(ours) and any(fn.endswith(".md") for fn in os.listdir(ours)):
+        return ours
+    legacy = _legacy_project_memory_dir(cwd)
+    if legacy:
+        return legacy
+    return ours
+
+
+def _legacy_project_memory_dir(cwd: str | None) -> str | None:
+    """The pre-0.8.23 location, only when it actually holds records.
+
+    Reads the old project key so records promoted before the move are still found;
+    returns None (so the caller keeps sleep's own home) when nothing with a body is
+    there.
+    """
+    base = os.environ.get("CLAUDE_CONFIG_DIR") or os.path.expanduser("~/.claude-work")
+    cands = []
+    if cwd:
+        cands.append(os.path.join(base, "projects", _project_key(cwd), "memory"))
+    cands.append(os.path.join(base, "projects", _project_key(os.getcwd()), "memory"))
+    for cand in cands:
+        try:
+            names = os.listdir(cand)
+        except OSError:
+            continue
+        if any(fn.endswith(".md") and fn != "MEMORY.md" for fn in names):
+            return cand
+    return None
+
+
+def _project_key(cwd: str) -> str:
+    return re.sub(r"[^A-Za-z0-9._-]", "-", os.path.abspath(cwd)).strip("-")
 
 
 def new_id(prefix: str = "s") -> str:

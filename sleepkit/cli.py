@@ -828,6 +828,14 @@ def main(argv=None) -> int:
     ij.set_defaults(fn=cmd_inject)
 
     a = ap.parse_args(argv)
+    # The env file carries what an unattended run needs and the shell did not export.
+    # Only the two keys memory_dir() itself reads are adopted here: a headless pass has
+    # no interactive shell to set them, and reading that file for the model transport
+    # alone (llm.auth_env) left SLEEP_MEMORY_DIR a silent no-op. The real environment
+    # still wins, so a one-off shell or a test is never overridden by a stale value.
+    for k, v in llm.env_overrides(paths.env_file()).items():
+        if k in ("SLEEP_MEMORY_DIR", "SLEEP_MODEL"):
+            os.environ.setdefault(k, v)
     if hasattr(a, "model"):
         a.model = llm.resolve_model(getattr(a, "model", None))
     paths.home()

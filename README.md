@@ -468,11 +468,12 @@ All runtime data lives under `$SLEEP_HOME`, which defaults to `~/.sleep`:
 ```text
 buffer/         temporary T0 records
 candidates/     provisional T1 records
+memory/         permanent T2 memory: one file per record plus its MEMORY.md index
 reports/        replay reports
 logs/           hook and nightly logs
 .quarantine/    rejected unsafe input
 state.json      sleep and replay timestamps, and the last measured memory-quality summary
-env             optional scheduled-run environment
+env             optional scheduled-run environment (also where SLEEP_MEMORY_DIR is read from)
 ```
 
 Useful logs:
@@ -488,6 +489,29 @@ Use another home for testing or for a separate memory pool:
 ```bash
 SLEEP_HOME=/tmp/my-sleep ./sleep.py status -v
 ```
+
+### Where permanent memory is written
+
+T2 lives in one fixed place: `$SLEEP_HOME/memory` (`~/.sleep/memory` by default).
+It is sleep's own store and not a host's project memory, so it does not move with the
+directory a hook happened to run in and it cannot collide with the agent host's own
+memory files. `status` prints the path it resolved, on the `T2 canonical` line.
+
+`SLEEP_MEMORY_DIR` overrides it. Set it in `~/.sleep/env` for a scheduled run that
+has no shell of its own:
+
+```text
+SLEEP_MEMORY_DIR=/path/to/another/store
+```
+
+The two keys sleep reads from that file are `SLEEP_MEMORY_DIR` and `SLEEP_MODEL`;
+a value exported in the environment always wins over the file. Every `promote` and
+`demote` names the store it wrote, so a pass that landed somewhere unexpected says so
+rather than looking successful.
+
+An install that predates this keeps reading the project memory directory its records
+actually sit in, because a store has an external reader worth more than a tidy path.
+Run `./sleep.py status` to see which one is in force before moving records by hand.
 
 ## Troubleshooting
 
@@ -512,7 +536,7 @@ Use `--force` only when you intentionally want a model call.
 
 **The scheduled pass cannot reach the model**
 
-Confirm that `~/.sleep/env` exists, has mode `0600`, and contains the same provider settings used by your interactive shell. Then run `./sleep.py sleep --force` before relying on the scheduled pass (launchd / cron / Task Scheduler).
+Confirm that `~/.sleep/env` exists, has mode `0600`, and contains the same provider settings used by your interactive shell. A `SLEEP_MEMORY_DIR` line in that same file is honoured by scheduled runs; see [Where permanent memory is written](#where-permanent-memory-is-written). Then run `./sleep.py sleep --force` before relying on the scheduled pass (launchd / cron / Task Scheduler).
 
 **A candidate appears in the wrong context**
 

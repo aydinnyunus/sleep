@@ -3216,6 +3216,44 @@ class ModelNaming(Sandbox):
         log = self.consolidate()
         self.assertIn("--model anthropic/claude-haiku-4-5", log, log)
 
+    def test_the_memory_dir_in_the_env_file_is_the_store_that_is_written(self):
+        # The headless path has no interactive shell to export SLEEP_MEMORY_DIR, and
+        # llm.auth_env() only ever reached the model transport, so a line in the env
+        # file used to be a silent no-op: the pass promoted into whatever directory the
+        # fallback named. The line has to move the *store*, so this drives a real
+        # promote and asserts on where the file landed. SLEEP_MEMORY_DIR is cleared
+        # from the child's environment: the sandbox otherwise exports its own store,
+        # and a file can only be tested against a value that has a chance to win.
+        from_file = os.path.join(self.home, "from-file")
+        self.write(os.path.join(self.sleep_home, "env"),
+                   "SLEEP_MEMORY_DIR=%s\n" % from_file)
+        self.seed_candidate("cenvstore", "The staging gateway needs a ten minute timeout.",
+                            cwd=self.proj_a)
+        env = self.env()
+        env.pop("SLEEP_MEMORY_DIR", None)
+        got = self._run([PY, SLEEPCTL, "promote", "cenvstore"], stdin="",
+                        cwd=self.proj_a, env=env)
+        self.assertEqual(got.returncode, 0, got.stdout + got.stderr)
+        self.assertIn(from_file, got.stdout, "the pass must report the store it wrote")
+        self.assertTrue(os.listdir(from_file), "the env file's directory stayed empty")
+        # The store the process would otherwise have picked must stay untouched, which
+        # is the half a "the value is readable" check cannot see.
+        self.assertEqual(os.listdir(self.memory), [],
+                         "the fallback store was written to as well")
+
+    def test_an_exported_memory_dir_beats_the_one_in_the_file(self):
+        # A one-off shell (or a test) must never be overridden by a stale line on disk,
+        # which is the same precedence every other variable in that file already has.
+        self.write(os.path.join(self.sleep_home, "env"),
+                   "SLEEP_MEMORY_DIR=%s\n" % os.path.join(self.home, "from-file"))
+        self.seed_candidate("cenvwins", "The staging gateway needs a ten minute timeout.",
+                            cwd=self.proj_a)
+        got = self.cli("promote", "cenvwins", SLEEP_MEMORY_DIR=self.memory)
+        self.assertEqual(got.returncode, 0, got.stdout + got.stderr)
+        self.assertTrue(os.listdir(self.memory), "the exported store stayed empty")
+        self.assertFalse(os.path.isdir(os.path.join(self.home, "from-file")),
+                         "the file's store must not be created when the shell named one")
+
 class BufferWindow(Sandbox):
     """T0 larger than one consolidation window: the leftover is named, not silent.
 
