@@ -182,7 +182,10 @@ def cmd_show(a) -> int:
 
 
 def cmd_promote(a) -> int:
-    ok, out = store.promote(a.id, memory_dir=a.memory_dir, dry_run=a.dry_run)
+    """`--confirmed-by-user` is the person's own answer to "did you say this?", which is
+    the one thing an agent-sourced preference cannot answer for itself."""
+    ok, out = store.promote(a.id, memory_dir=a.memory_dir, dry_run=a.dry_run,
+                            confirmed=getattr(a, "confirmed", False))
     _p(("PROMOTED " if ok else "REFUSED ") + out)
     return 0 if ok else 3
 
@@ -200,6 +203,16 @@ def cmd_refuse(a) -> int:
     ok = store.set_status(a.candidate_id, "refused",
                           {"notes": a.note} if a.note else None)
     _p("refused " + a.candidate_id if ok else "REFUSED (no such candidate): " + a.candidate_id)
+    return 0 if ok else 3
+
+
+def cmd_keep(a) -> int:
+    """Park a candidate deliberately. The record stays provisional; the queue checks
+    stop naming it until the window ends. Nothing is dropped and no status changes,
+    because "I have seen this and I am not deciding yet" is a real answer and there
+    was no way to say it."""
+    ok, out = store.keep_candidate(a.candidate_id, weeks=a.weeks)
+    _p(("KEPT " if ok else "REFUSED ") + out)
     return 0 if ok else 3
 
 
@@ -702,6 +715,9 @@ def main(argv=None) -> int:
     pr.add_argument("id")
     pr.add_argument("--memory-dir")
     pr.add_argument("--dry-run", action="store_true")
+    pr.add_argument("--confirmed-by-user", dest="confirmed", action="store_true",
+                    help="the user read this record and confirmed it; answers the "
+                         "user-provenance refusal for an agent-sourced preference")
     pr.set_defaults(fn=cmd_promote)
 
     dm = sub.add_parser("demote", help="un-approve a promoted memory (T2 -> refused, marked not deleted)")
@@ -715,6 +731,11 @@ def main(argv=None) -> int:
     rf.add_argument("candidate_id")
     rf.add_argument("--note", default="")
     rf.set_defaults(fn=cmd_refuse)
+
+    kp = sub.add_parser("keep", help="park a candidate for N weeks without deciding")
+    kp.add_argument("candidate_id")
+    kp.add_argument("--weeks", type=float, default=8.0)
+    kp.set_defaults(fn=cmd_keep)
 
     su = sub.add_parser("supersede", help="mark old candidate superseded by new")
     su.add_argument("old_id")

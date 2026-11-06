@@ -698,3 +698,109 @@ Pinned by `tests/test_cli.py::InstallUninstall`
 `test_mac_scheduler_reports_a_bootstrap_that_registers_nothing`). The fakes hold jobs in
 a state file, so the read-back is a real second call and not a restatement of the first,
 and the second test fails if "loaded" is ever printed on the strength of an exit code.
+
+
+## 2026-11-06: the queue knew it was stuck and could not say so
+
+`~/.sleep` on this machine held 11 provisional candidates, every one of them
+`injected: 2`, none of them with a `rediscovered` count, and not one promoted or
+refused. `doctor --json` returned a single line (`quarantine-awaiting-review (1)`).
+The band those 11 were sitting in had no name in the report at all.
+
+The reason is structural. The stale check keys on `last = rediscovered_at or ts`
+(`store.py:1221`), and the unused check requires `served == 0` where
+`served = injected + rediscovered` (`store.py:1237`). A record that entered two
+sessions' contexts and changed nothing is invisible to both: too young for one,
+too served for the other.
+
+The new line, `served-ignored`, is the missing third question: has anything happened
+since this entered a context at all. `MIN_SERVED_IGNORED = 2` (one injection can be a
+session that ended before it read anything, which is not evidence about the record),
+`rediscovered == 0`, and half the record's own stale window gone by.
+
+Measured in a throwaway `SLEEP_HOME` (the live store was not touched):
+
+| state | doctor |
+|---|---|
+| 11 candidates, never injected, fresh | `[]` |
+| 11 candidates, `injected=2`, 25 days old | `[]` (a preference's half-window is 45.5 days) |
+| 11 candidates, `injected=2`, 60 days old | `served-ignored x11` |
+
+One row of the third case:
+
+    {"age_days": 59, "id": "c17939463163db0", "injected": 2,
+     "issue": "served-ignored", "kind": "preference", "rediscovered": 0,
+     "threshold_weeks": 6.5}
+
+and its score, through the gate that shipped in 0.8.20:
+
+    urgency(doctor()) -> (22, 'served-ignored (+22; served-ignored x11)')
+
+The floor still holds: with an empty buffer the same run returns
+`reason: buffer has 0 record(s), needs 3` while carrying `urgency: 22`.
+
+`sleep keep <id> [--weeks N]` is the answer half. It writes `kept`/`kept_until` into
+the record's own frontmatter and the three queue checks stand down for the window;
+nothing is dropped and the status stays `provisional`, because "I have seen this and
+I am not deciding yet" was previously inexpressible except by promoting the record
+(a lie about its status) or editing the file by hand.
+
+    $ ./sleep.py keep c17939463163db0 --weeks 8
+    KEPT kept c17939463163db0 until 2027-01-01 (56 day(s))
+    # doctor: served-ignored x11 -> x10
+    # window expired by hand -> x11 again, is_kept(meta) False
+
+Pinned by `tests/test_core.py::T` (`test_a_served_candidate_nobody_acted_on_is_named`,
+`test_one_injection_is_not_yet_evidence_about_the_record`,
+`test_a_rediscovered_record_is_not_served_ignored`,
+`test_keep_parks_a_record_and_the_window_expires`,
+`test_keep_refuses_a_record_that_is_not_provisional`) and
+`tests/test_cli.py::Gates` (`test_keep_parks_a_candidate_and_the_doctor_stops_naming_it`,
+`test_keep_refuses_a_candidate_that_is_not_provisional`).
+
+## 2026-11-06: a refusal that had no way to be answered
+
+`promote` refuses a preference whose `source` is not `user`, on the reasoning that a
+statement about what the person wants needs the person's own words. That rule is right
+and it had no door: the person reading the record and saying "yes, that is what I want"
+could not act on it, so a correct instruction an agent had read out of their behaviour
+stayed provisional forever, or got promoted after somebody edited the file by hand.
+
+Two records on this machine sat in exactly that state (`c179355873180e3`, an agent's
+reading that "pushla" means work is not done until it is pushed; `c17936420749fd5`, that
+model references need their provider prefix). The person read both and confirmed both.
+
+### What was added
+
+`sleep promote <id> --confirmed-by-user` -> `store.promote(..., confirmed=True)`.
+
+The flag is the first of the two questions answered in the room. The kind check asks *did
+the person say this*; the trust check asks *was it verified*. Confirmation answers the
+first and deliberately not the second, so the speculative-source refusal still runs on the
+same call. When it passes:
+
+- the record is written with `source: user` (which is the fact the refusal was about), plus
+  `confirmed_by: user` and `confirmed_at`, so a memory that says "the user wants X" can
+  show who said so and when;
+- the T1 trace in `archive/candidates/` carries the same three fields, because the record
+  that says the user confirmed it must not leave behind a trace saying an agent read it;
+- the refusal message now names the flag, so the rule is answerable from the output rather
+  than from reading `store.py`.
+
+### Measured (temporary `SLEEP_HOME`, agent-sourced preference, trust=observed)
+
+| call | result |
+|---|---|
+| `promote cid` | refused, message names `--confirmed-by-user` |
+| `promote cid --confirmed-by-user` | promoted, T2 frontmatter `source: user`, `confirmed_by: user`, `confirmed_at` set |
+| T1 archive after that call | `source: user`, `confirmed_by: user`, `confirmed_at` set |
+| `promote cid --confirmed-by-user`, trust=speculative | still refused, "refusing to persist speculative memory" |
+
+Tests: `test_an_agent_sourced_preference_needs_the_users_own_confirmation` and
+`test_confirmation_does_not_launder_a_speculative_record` in `tests/test_cli.py`.
+
+### What this does not do
+
+The flag does not make an agent's reading true. It records that a person read one and
+agreed, which is the only thing that can make it permanent, and the receipt is on the
+record. A later reader who doubts the memory can see that a human confirmed it and when.

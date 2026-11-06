@@ -468,6 +468,10 @@ def hours_since(ts):
 #   near-duplicate-candidates            1
 #   candidate-duplicates-memory          1
 #   stale-value-in-memory                1
+#   served-ignored                       2  this is the stuck-queue shape: the record
+#                                           already entered sessions and changed nothing,
+#                                           and it is the one state where a pass can make
+#                                           progress (a promote, a drop, or a keep)
 #
 # Everything else (duplicate-heading-in-file and any future issue) weighs 0 on
 # purpose: a new finding must be given a weight deliberately, and an unknown one must
@@ -476,6 +480,7 @@ URGENCY_WEIGHTS = {
     "buffer-exceeds-consolidation-window": (3, "the backlog grows until a pass runs"),
     "stale-candidate-unrediscovered": (2, "unconfirmed memory is still served as context"),
     "unused-candidate-never-served": (2, "a record no session was ever served"),
+    "served-ignored": (2, "a record sessions carried and never acted on"),
     "broken-supersede-link": (1, "a link dangles but does not grow"),
     "quarantine-awaiting-review": (1, "needs a person, not a pass"),
     "contradicting-candidates": (1, "the pass can surface it, only a person can settle it"),

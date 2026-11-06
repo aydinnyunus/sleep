@@ -62,7 +62,10 @@ Sleep adds a reviewable memory cycle to nine selectable coding-agent targets. It
 - **Kind-aware promotion.** `promote` refuses to make an agent's reading of a *preference*
   permanent: a statement about what you want needs your own words, while a fact, procedure or
   warning is confirmed by the human running `promote` (you read it and chose it). The refusal
-  message names which rule stopped it, and the existing speculative-source check still runs first.
+  message names which rule stopped it and how to answer it: `sleep promote <id>
+  --confirmed-by-user` is you saying "yes, I want that", so the record is written with
+  `source: user` and the date you confirmed it, and the T1 trace keeps the same receipt. The
+  flag answers only the provenance question; the speculative-source check still runs first.
 - **Repeated preference detection.** `mine` finds instructions you gave in multiple sessions without a model call.
 - **Project isolation.** A project's provisional memory is injected only into that project.
 - **Reviewable permanence.** Each approved memory in your index carries its review date and source, so you can tell when a saved instruction was pinned.
@@ -83,6 +86,7 @@ Sleep adds a reviewable memory cycle to nine selectable coding-agent targets. It
   hint a model proposed, so a wrong tag costs a missing filter hit, never a wrong fact.
 - **Served-record accounting.** Every injection stamps the records it actually printed (`injected`, `injected_at` on the record itself), so `doctor` can name a provisional that **no session has ever asked for** in 8+ weeks (`unused-candidate-never-served`). That is a different fact from "nobody re-learned it", and only the record can tell the two apart; report only, nothing is dropped.
 - **Indexed by default.** A long observation is injected as its opening claim plus a pointer (`[+714 chars: sleep.py show <id>]`) instead of its whole narrative; `inject --full` prints the complete bodies. The block states its warning once in the frame and each line carries only its own `source`/`trust`; measured on a live pool: 5581 -> 3377 characters with the index, then 3359 -> **2896** once the per-line frame stopped repeating (~28% of the block had been identical prose).
+- **A queue that is not moving.** Three report lines answer three different questions about a provisional record that has gone quiet: `stale-candidate-unrediscovered` (nobody re-learned it), `unused-candidate-never-served` (nobody ever saw it), and `served-ignored` (sessions carried it and nothing happened - two or more injections with no rediscovery, past half its kind's window). The third one is the stuck-queue shape, and the answer to it is a decision rather than a wait: promote it, refuse it, or say `sleep keep <id>` and name the window you are parking it for. A kept record keeps its status and its body; only the three queue lines stand down, and they come back when the window ends. All three remain report-only.
 - **Stale-value scan.** `doctor --stale <value>` finds which approved records still hold a value you know has changed (for example a deployment URL). Unreviewed provisional candidates are also flagged: a fact the agent proposed once and never rediscovered for 4+ weeks keeps getting injected into every session's context, so `doctor` surfaces it as `stale-candidate-unrediscovered` (a report line it never acts on, nothing is dropped).
 - **Safety gates.** Secrets are redacted, hostile text is quarantined, and machine-generated prompts cannot claim user provenance.
 
@@ -363,14 +367,16 @@ Run the two dream components separately when you want more control:
 | `./sleep.py sleep --force` | Run consolidation now |
 | `./sleep.py show <id>` | Inspect a candidate and its rendered context |
 | `./sleep.py promote <id>` | Move an approved candidate to permanent memory |
+| `./sleep.py promote <id> --confirmed-by-user` | Promote a *preference* an agent read out of your behaviour, after you have read it and said it is right: the record is written with `source: user` and the date you confirmed it |
 | `./sleep.py demote <id> --note "..."` | Un-approve a promoted memory: mark the approved record as retracted (kept on record, not deleted) and reopen the candidate as refused. Also accepts a permanent record's filename slug or the `id:` it carries, so a memory whose candidate record is gone is still reversible |
 | `./sleep.py refuse <id> --note "..."` | Record that a candidate is incorrect |
+| `./sleep.py keep <id> [--weeks N]` | Park a candidate for N weeks (default 8) without deciding: the record stays provisional and the queue checks (`stale-candidate-unrediscovered`, `unused-candidate-never-served`, `served-ignored`) stop naming it until the window ends. Nothing is dropped and no status changes, because "I have seen this and I am not deciding yet" is a real answer |
 | `./sleep.py replay --run --limit 3` | Compare selected tasks with memory off and on |
 | `./sleep.py status -v` | ... and the last measured memory quality (`3 helps / 1 hurts / 4 ties from 8 samples`, or "no replay measurement has run yet") |
 | `./sleep.py mine --dry-run` | Find preferences repeated across sessions |
 | `./sleep.py nightly --dry-run` | Preview the unattended nightly workflow |
 | `./sleep.py sleep --min-urgency <points>` | Score the hygiene findings and let them waive `--min-interval` (default 2: a growing backlog or a stale candidate clears it, a dangling link does not). `--min-urgency 0` or `--no-doctor-gate` keeps the flat policy, and the record floor (`--min-records`) is never waived |
-| `./sleep.py doctor` | Find duplicate or overlapping memory records, flag contradicting candidates (same subject, one side carries a correction marker) and print the `supersede <older> <newer>` command to run, flag provisional candidates unrediscovered past their kind's threshold (4 weeks for a fact, 13 for a preference, 8 for a procedure, 52 for a warning; kind and threshold appear in the finding), flag records no session was ever served past their kind's unused threshold (8 / 26 / 12 / 52), flag supersede pointers that name a record no longer in the store, report a T0 buffer larger
+| `./sleep.py doctor` | Find duplicate or overlapping memory records, flag contradicting candidates (same subject, one side carries a correction marker) and print the `supersede <older> <newer>` command to run, flag provisional candidates unrediscovered past their kind's threshold (4 weeks for a fact, 13 for a preference, 8 for a procedure, 52 for a warning; kind and threshold appear in the finding), flag records no session was ever served past their kind's unused threshold (8 / 26 / 12 / 52), flag records that sessions did carry and then never acted on (`served-ignored`: two or more injections, no rediscovery, and half the kind's stale window gone by - the shape a stuck queue leaves behind), flag supersede pointers that name a record no longer in the store, report a T0 buffer larger
 than the 120-record consolidation window (with the count left outside it), and report records
 parked in quarantine awaiting a human (report only: it never supersedes, drops, merges or un-parks anything itself) |
 | `./sleep.py doctor --stale <value>` | Show which approved records still hold a stale value (e.g. a changed URL) |

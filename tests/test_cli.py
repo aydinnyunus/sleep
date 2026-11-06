@@ -991,6 +991,70 @@ class Gates(Sandbox):
                          "a refused record must stop being injected")
         self.assertEqual(self.cli("refuse", "cnope").returncode, 3)
 
+    def test_keep_parks_a_candidate_and_the_doctor_stops_naming_it(self):
+        self.seed_candidate("ckpt", "The deploy flow prefers blue green over restarts.",
+                            kind="preference", ts="2026-01-01T00:00:00+0300")
+        # A served-and-ignored record: injected twice, never re-learned. The fixture
+        # writes frontmatter by hand, so the counters go in the same way.
+        path = os.path.join(self.sleep_home, "candidates", "ckpt.md")
+        text = self.read(path)
+        text = text.replace("notes:", "injected: 2\ninjected_at: 2026-01-02T00:00:00+0300\nnotes:")
+        self.write(path, text)
+        before = self.cli("doctor", "--json")
+        self.assertIn("served-ignored", before.stdout, before.stdout)
+        got = self.cli("keep", "ckpt", "--weeks", "8")
+        self.assertEqual(got.returncode, 0, got.stderr)
+        self.assertIn("KEPT kept ckpt", got.stdout)
+        after = self.cli("doctor", "--json")
+        self.assertNotIn("served-ignored", after.stdout,
+                         "a parked record must stop being named")
+        kept = self.read(path)
+        self.assertIn("kept_until:", kept)
+        self.assertIn("status: provisional", kept, "keep parks a record, it does not promote it")
+        self.assertEqual(self.cli("keep", "cnope").returncode, 3)
+
+    def test_an_agent_sourced_preference_needs_the_users_own_confirmation(self):
+        """A preference is a sentence about the person, so an agent's reading of one is
+        not evidence about them. The refusal has to say that, and the confirmation has
+        to leave both copies able to show who said so."""
+        cid = "cagentpref"
+        self.seed_candidate(cid, "The user wants provider prefixes on model references.",
+                            source="agent", trust="observed", kind="preference")
+        got = self.cli("promote", cid, "--memory-dir", self.memory)
+        self.assertEqual(got.returncode, 3, got.stdout)
+        self.assertIn("needs the user's own words", got.stdout)
+        self.assertIn("--confirmed-by-user", got.stdout)
+        got = self.cli("promote", cid, "--memory-dir", self.memory,
+                       "--confirmed-by-user")
+        self.assertEqual(got.returncode, 0, got.stderr)
+        self.assertIn("PROMOTED", got.stdout)
+        # Both copies have to be able to show who said so: the T2 file carries the
+        # claim, and the T1 trace is what a later reader audits the claim against.
+        archived = self.read(os.path.join(self.sleep_home, "archive", "candidates",
+                                          cid + ".md"))
+        self.assertIn("source: user", archived)
+        self.assertIn("confirmed_by: user", archived)
+        promoted = [f for f in os.listdir(self.memory)
+                    if f.endswith(".md") and f != "MEMORY.md"
+                    and "provider-prefixes" in f]
+        self.assertEqual(len(promoted), 1)
+        self.assertIn("source: user", self.read(os.path.join(self.memory, promoted[0])))
+
+    def test_confirmation_does_not_launder_a_speculative_record(self):
+        cid = "cspecpref"
+        self.seed_candidate(cid, "The user wants provider prefixes on model references.",
+                            source="agent", trust="speculative", kind="preference")
+        got = self.cli("promote", cid, "--memory-dir", self.memory,
+                       "--confirmed-by-user")
+        self.assertEqual(got.returncode, 3, got.stdout)
+        self.assertIn("speculative", got.stdout)
+
+    def test_keep_refuses_a_candidate_that_is_not_provisional(self):
+        self.seed_candidate("cref", "A record already judged wrong.", status="refused")
+        got = self.cli("keep", "cref", "--weeks", "4")
+        self.assertEqual(got.returncode, 3)
+        self.assertIn("REFUSED", got.stdout)
+
     def test_supersede_links_both_ends_of_the_pair(self):
         self.seed_candidate("cold", "Old note about the proxy timeout.", cwd=self.proj_a)
         self.seed_candidate("cnew", "New note about the proxy timeout window.", cwd=self.proj_a)

@@ -17,7 +17,7 @@ import os
 import re
 import shutil
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from . import paths, safety
 
@@ -32,6 +32,12 @@ STALE_CANDIDATE_WEEKS = 4.0
 # looked at it" are different facts and only the second one means the queue is filling
 # with things that were never useful. Report only, like every other doctor line.
 UNUSED_CANDIDATE_WEEKS = 8.0
+
+# How many injections are enough to call a record served-and-ignored. Two, not one:
+# a single injection can be a session that ended before it read anything, which is
+# not evidence about the record. Two independent sessions carrying it and changing
+# nothing is.
+MIN_SERVED_IGNORED = 2
 
 # What the two constants above are a default FOR. A record's kind is not decoration:
 # a warning that nobody re-learned in a month is not the same debt as a preference
@@ -56,6 +62,27 @@ KIND_LIFETIME_WEEKS = {
     "procedure": (8.0, 12.0),
     "warning": (52.0, 52.0),
 }
+
+
+def is_kept(meta: dict) -> bool:
+    """True while a person's `keep` on this record still holds.
+
+    `sleep keep` exists because "leave this here" was not expressible: the only way to
+    stop the queue checks naming a record was to promote it (a lie about its status) or
+    to edit the file by hand. A kept record is skipped by those checks until its
+    `kept_until` passes; nothing is dropped, and the record stays provisional.
+    """
+    until = str(meta.get("kept_until", "") or "").strip()
+    if not until:
+        return False
+    if not str(meta.get("kept", "") or "").strip():
+        return False
+    try:
+        end = datetime.strptime(until, "%Y-%m-%d")
+    except ValueError:
+        return False
+    now = datetime.strptime(paths.now()[:10], "%Y-%m-%d")
+    return now < end
 
 
 def lifetime_for(kind: str, default_weeks: float = 0.0) -> tuple[float, float, str]:
@@ -343,6 +370,48 @@ def _record_rediscovery(cid: str, session: str) -> str | None:
         cid, n, cid)
 
 
+def keep_candidate(cid: str, weeks: float = 8.0) -> tuple[bool, str]:
+    """Mark a provisional record as deliberately parked for `weeks`.
+
+    Writes `kept`/`kept_until` into the record's own frontmatter, which is where the
+    doctor reads them: the decision lives next to the fact it is about, and it survives
+    a restart in a way a flag file would not. Nothing else about the record changes -
+    same body, same status, same queue - so the checks simply stop naming it until the
+    window ends, after which it is judged again as if nothing had happened.
+    """
+    got = get_candidate(cid)
+    if not got:
+        return False, "no such candidate: %s" % cid
+    meta, body = got
+    if meta.get("status") != "provisional":
+        return False, "%s is %s, not provisional" % (cid, meta.get("status"))
+    try:
+        days = max(1, int(round(float(weeks) * 7)))
+    except (TypeError, ValueError):
+        return False, "weeks must be a number"
+    now = paths.now()[:10]
+    until = _date_plus_days(now, days)
+    meta["kept"] = now
+    meta["kept_until"] = until
+    loc = paths.candidates_dir()
+    if not os.path.isfile(os.path.join(loc, cid + ".md")):
+        p = os.path.join(paths.archive_dir("candidates"), cid + ".md")
+        if os.path.isfile(p):
+            loc = paths.archive_dir("candidates")
+    try:
+        with open(os.path.join(loc, cid + ".md"), "w", encoding="utf-8") as fh:
+            fh.write(emit(meta, body))
+    except OSError as exc:
+        return False, "could not write %s: %s" % (cid, exc)
+    return True, "kept %s until %s (%d day(s))" % (cid, until, days)
+
+
+def _date_plus_days(day: str, days: int) -> str:
+    """`day` (YYYY-MM-DD) plus `days`, as a plain calendar date."""
+    base = datetime.strptime(day, "%Y-%m-%d")
+    return (base + timedelta(days=days)).strftime("%Y-%m-%d")
+
+
 def record_injection(ids: list[str]) -> int:
     """Stamp `injected`/`injected_at` on the records a session's context just carried.
 
@@ -518,8 +587,17 @@ def slugify(text: str, maxlen: int = 48) -> str:
 KIND_PROMOTE_NEEDS_USER = ("preference",)
 
 
-def promote(cid: str, memory_dir: str | None = None, dry_run: bool = False) -> tuple[bool, str]:
-    """T1 -> T2. Explicit human act. Creates a NEW file, never edits one."""
+def promote(cid: str, memory_dir: str | None = None, dry_run: bool = False,
+            confirmed: bool = False) -> tuple[bool, str]:
+    """T1 -> T2. Explicit human act. Creates a NEW file, never edits one.
+
+    A preference captured from an agent is an agent's READING of what the user wants,
+    and the rule above refuses it. The kind check asks whether the person said it;
+    the trust check asks whether it was verified. `confirmed=True` is the first
+    question answered in the room: the person read this body and said yes, so the
+    source becomes `user` and the record carries when that happened, because a
+    memory that says "the user wants X" must be able to show who said so. It does
+    not answer the second question, which is why the trust check still runs."""
     got = get_candidate(cid)
     if not got:
         return False, "no such candidate: " + cid
@@ -531,10 +609,18 @@ def promote(cid: str, memory_dir: str | None = None, dry_run: bool = False) -> t
         return False, ("refusing to persist speculative memory from source=%s; "
                        "re-record with the user's own words or run a replay first" % src)
     kind = str(meta.get("kind", "") or "")
-    if kind in KIND_PROMOTE_NEEDS_USER and src != "user":
+    if kind in KIND_PROMOTE_NEEDS_USER and src != "user" and not confirmed:
         return False, ("refusing to persist a %s from source=%s: a statement about what "
                        "the user wants needs the user's own words, not an agent's reading "
-                       "of them" % (kind, src))
+                       "of them. If the user read this record and confirmed it, re-run with "
+                       "--confirmed-by-user" % (kind, src))
+    if confirmed:
+        # Only what the refusal was about: the provenance of a claim about the person.
+        # trust is untouched, so a speculative record is still refused one line above.
+        src = "user"
+        meta["source"] = "user"
+        meta["confirmed_by"] = "user"
+        meta["confirmed_at"] = paths.now()
     mdir = memory_dir or paths.memory_dir()
     name = "%s.md" % slugify(body.split(".")[0][:60] or cid)
     dest = os.path.join(mdir, name)
@@ -563,7 +649,14 @@ def promote(cid: str, memory_dir: str | None = None, dry_run: bool = False) -> t
     with open(dest, "w", encoding="utf-8") as fh:
         fh.write(emit(out_meta, body))
     ok, why = append_index_line(mdir, line)
-    set_status(cid, "promoted", {"promoted_to": dest, "promoted_at": paths.now()})
+    # `confirmed` rewrote meta in memory; the T1 copy has to record that too, or the
+    # record that says "the user confirmed this" leaves behind a trace saying an agent
+    # read it. set_status merges the extras over the stored frontmatter for this.
+    extra = {"promoted_to": dest, "promoted_at": paths.now()}
+    if confirmed:
+        extra.update({"source": "user", "confirmed_by": "user",
+                      "confirmed_at": meta.get("confirmed_at")})
+    set_status(cid, "promoted", extra)
     shutil.move(os.path.join(paths.candidates_dir(), cid + ".md"),
                 os.path.join(paths.archive_dir("candidates"), cid + ".md"))
     return True, "wrote %s; index %s" % (dest, why)
@@ -1211,6 +1304,11 @@ def doctor(memory_dir: str | None = None, targets: list[str] | None = None,
     for c in list_candidates():
         if c.get("status") != "provisional":
             continue
+        if is_kept(c):
+            # The person looked at this record and said "leave it alone". A deliberate
+            # wait is not a smell, so the three queue checks below all stand down for
+            # the window that keep set, and none of them pretends the record changed.
+            continue
         # Last activity = the most recent rediscovery if there was one, else the
         # record's own creation ts. A provisional that is neither being promoted
         # nor re-learned for weeks is noise the queue keeps injecting into every
@@ -1225,6 +1323,26 @@ def doctor(memory_dir: str | None = None, targets: list[str] | None = None,
                         "kind": kind, "threshold_weeks": stale_weeks,
                         "age_days": int(age_h // 24),
                         "last_seen": str(last)[:10], "rediscovered": int(c.get("rediscovered", 0) or 0)})
+        # The third emptiness, and the one the first two cannot see. `unused` below
+        # needs served == 0, so a record that entered a session's context twice and
+        # was never promoted, never re-learned and never asked for is invisible to
+        # both: it is neither unused nor quiet-as-a-whole, it is being served into
+        # every session and doing nothing. That is the shape a stuck queue has, and
+        # before this check the only way to see it was to read `status` by eye.
+        #
+        # The bar is deliberately low: MIN_SERVED_IGNORED injections is enough, and the
+        # age threshold is half the record's own stale window, because the question is
+        # not "has this gone bad" but "has anything happened since it entered the
+        # context at all". It stays report only, like every other line here: the
+        # answer is a promote, a drop, or `sleep keep`, and all three are a person's.
+        served = int(c.get("injected", 0) or 0)
+        redis = int(c.get("rediscovered", 0) or 0)
+        if served >= MIN_SERVED_IGNORED and redis == 0 and age_h is not None:
+            if age_h >= stale_weeks * 7 * 24 / 2:
+                out.append({"issue": "served-ignored", "id": c["id"], "kind": kind,
+                            "injected": served, "rediscovered": redis,
+                            "age_days": int(age_h // 24),
+                            "threshold_weeks": round(stale_weeks / 2, 1)})
     # The sibling of the check above, measuring a different emptiness. That one says
     # "nobody re-learned this"; this one says "nobody ever asked for this": no inject
     # ever carried it and no consolidation ever saw it come up again. A record can be
@@ -1233,6 +1351,8 @@ def doctor(memory_dir: str | None = None, targets: list[str] | None = None,
     # paying is published in the record itself.
     for c in list_candidates():
         if c.get("status") != "provisional":
+            continue
+        if is_kept(c):
             continue
         served = int(c.get("injected", 0) or 0) + int(c.get("rediscovered", 0) or 0)
         if served:

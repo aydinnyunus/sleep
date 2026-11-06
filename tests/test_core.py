@@ -361,6 +361,90 @@ class T(unittest.TestCase):
         self.assertEqual(rows[0]["kind"], "warning")
         self.assertEqual(rows[0]["threshold_weeks"], 52.0)
 
+    def _serve(self, cid, n=2):
+        """Rewrite one candidate's injected counters, as N sessions seeing it would."""
+        got = store.get_candidate(cid)
+        assert got is not None
+        meta, body = got
+        meta["injected"] = str(n)
+        meta["injected_at"] = paths.now()
+        p = os.path.join(paths.candidates_dir(), cid + ".md")
+        with open(p, "w", encoding="utf-8") as fh:
+            fh.write(store.emit(meta, body))
+
+    def test_a_served_candidate_nobody_acted_on_is_named(self):
+        # The stuck queue: 11 records entered sessions (injected), none was re-learned
+        # (rediscovered), none was promoted. `unused` cannot see them because served>0
+        # and `stale` cannot see them while they are young, so before this check the
+        # only way to find the band was to read `status` by eye.
+        cid = self._record("the deploy flow prefers blue green over rolling restarts",
+                           "preference", 60)
+        self._serve(cid, 2)
+        rows = [r for r in store.doctor() if r["issue"] == "served-ignored"]
+        self.assertEqual(len(rows), 1, rows)
+        self.assertEqual(rows[0]["id"], cid)
+        self.assertEqual(rows[0]["injected"], 2)
+        self.assertEqual(rows[0]["rediscovered"], 0)
+        self.assertEqual(rows[0]["threshold_weeks"], 6.5)
+
+    def test_one_injection_is_not_yet_evidence_about_the_record(self):
+        # A single injection can be a session that ended before it read anything, so
+        # the bar is two. Without this the check fires on every freshly served record.
+        cid = self._record("the registry mirror keeps the http1 auth header quirk",
+                           "preference", 60)
+        self._serve(cid, 1)
+        self.assertEqual([r for r in store.doctor() if r["issue"] == "served-ignored"], [])
+
+    def test_a_rediscovered_record_is_not_served_ignored(self):
+        # Served and re-learned is a healthy record, whatever the injection count says.
+        cid = self._record("a candidate the agent keeps re-deriving across sessions",
+                           "preference", 60)
+        self._serve(cid, 5)
+        got = store.get_candidate(cid)
+        assert got is not None
+        meta, body = got
+        meta["rediscovered"] = "1"
+        meta["rediscovered_at"] = paths.now()
+        p = os.path.join(paths.candidates_dir(), cid + ".md")
+        with open(p, "w", encoding="utf-8") as fh:
+            fh.write(store.emit(meta, body))
+        self.assertEqual([r for r in store.doctor() if r["issue"] == "served-ignored"], [])
+
+    def test_keep_parks_a_record_and_the_window_expires(self):
+        # "I have seen this and I am not deciding yet" is a real answer. keep writes it
+        # into the record's own frontmatter, the checks stand down, and when the window
+        # ends the record is judged again as if nothing had happened.
+        cid = self._record("the staging gateway wants the X-Route blue header",
+                           "preference", 60)
+        self._serve(cid, 2)
+        self.assertTrue(any(r["issue"] == "served-ignored" for r in store.doctor()))
+        ok, out = store.keep_candidate(cid, weeks=8)
+        self.assertTrue(ok, out)
+        self.assertIn("kept", out)
+        self.assertEqual([r for r in store.doctor() if r["issue"] == "served-ignored"], [])
+        meta, _ = store.get_candidate(cid)
+        self.assertEqual(meta["status"], "provisional")   # parked, not promoted
+        self.assertTrue(meta["kept_until"])
+        # expire the window by hand and the finding comes back
+        path = os.path.join(paths.candidates_dir(), cid + ".md")
+        with open(path, encoding="utf-8") as fh:
+            text = fh.read()
+        out_text = re.sub(r"^kept_until: .*$", "kept_until: 2020-01-01", text,
+                          count=1, flags=re.M)
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(out_text)
+        meta2, _ = store.get_candidate(cid)
+        self.assertFalse(store.is_kept(meta2))
+        self.assertTrue(any(r["issue"] == "served-ignored" for r in store.doctor()))
+
+    def test_keep_refuses_a_record_that_is_not_provisional(self):
+        cid = self._record("a record about to be refused, which keep cannot park",
+                           "fact", 0)
+        store.set_status(cid, "refused")
+        ok, out = store.keep_candidate(cid, weeks=4)
+        self.assertFalse(ok)
+        self.assertIn("provisional", out)
+
     def test_prune_keeps_unread_records_worth_keeping(self):
         # 130 records, the ten oldest a mix of durable kinds. A file-level prune moved
         # all 130 to the archive; the pass can only read the newest 120, so those ten
@@ -857,6 +941,7 @@ class T(unittest.TestCase):
         self.assertIn("buffer-exceeds-consolidation-window", known)
         self.assertIn("stale-candidate-unrediscovered", known)
         self.assertIn("unused-candidate-never-served", known)
+        self.assertIn("served-ignored", known)
         self.assertNotIn("duplicate-heading-in-file", known,
                          "a heading smell must not be able to open a gate")
 
