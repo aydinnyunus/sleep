@@ -4,6 +4,14 @@ on:
   push:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      # A tag pushed by hand satisfies the idempotency check below, which used to
+      # skip BOTH the Release and the npm publish. Set this to publish a version
+      # whose tag already exists on the remote.
+      force_publish:
+        description: 'Publish even though the v<version> tag already exists'
+        type: boolean
+        default: false
 
 # GitHub Release + tag creation need write access to the repo. npm publish uses
 # the NPM_TOKEN secret, NOT this token.
@@ -44,6 +52,7 @@ jobs:
     outputs:
       version: ${{ steps.version.outputs.version }}
       released: ${{ steps.tag.outputs.released }}
+      publish: ${{ steps.tag.outputs.publish }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -59,37 +68,60 @@ jobs:
           TAG="v${{ steps.version.outputs.version }}"
           if git tag -l "$TAG" | grep -q "$TAG"; then
             echo "released=false" >> "$GITHUB_OUTPUT"
-            echo "Tag $TAG exists; nothing to release."
+            RELReleased=false
+            echo "Tag $TAG exists; not creating it again."
           else
             echo "released=true" >> "$GITHUB_OUTPUT"
-            echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+            RELReleased=true
             git config user.name "github-actions[bot]"
             git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
             git tag "$TAG"
             git push origin "$TAG"
           fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          # Publishing is a separate question from tagging. The npm step has its
+          # own already-live guard, and the Release step is idempotent in gh, so
+          # this only decides whether to ask them at all.
+          if [ "${{ inputs.force_publish }}" = "true" ]; then
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+            echo "force_publish requested; running the release and publish steps."
+          else
+            # RELReleased is set in both branches above; do not re-read this step's own
+            # outputs here, actionlint rejects self-reference within a step.
+            PUBLISH="${RELReleased:-false}"
+            echo "publish=$PUBLISH" >> "$GITHUB_OUTPUT"
+          fi
       - name: Create GitHub Release
-        if: steps.tag.outputs.released == 'true'
+        id: release
+        if: steps.tag.outputs.publish == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release create "${{ steps.tag.outputs.tag }}" \
             --repo "${{ github.repository }}" \
             --title "pi-sleep-agent ${{ steps.version.outputs.version }}" \
-            --notes "Release ${{ steps.version.outputs.version }} of pi-sleep-agent."
+            --notes "Release ${{ steps.version.outputs.version }} of pi-sleep-agent." \
+            || echo "release already exists; continuing."
       - uses: actions/setup-node@v4
-        if: steps.tag.outputs.released == 'true'
+        if: steps.tag.outputs.publish == 'true'
         with:
           node-version: '22'
           registry-url: 'https://registry.npmjs.org'
-      - name: Publish to npm (skip if version already live)
-        if: steps.tag.outputs.released == 'true'
+      - name: Publish to npm (skip only when the registry already serves the version)
+        if: steps.tag.outputs.publish == 'true'
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
           VERSION: ${{ steps.version.outputs.version }}
         run: |
-          if npm view "pi-sleep-agent@$VERSION" version >/dev/null 2>&1; then
-            echo "pi-sleep-agent@$VERSION already published; skipping."
-          else
-            npm publish --access public
-          fi
+          # registry-viewer can lag behind the write. An E404 on a version that
+          # IS live would otherwise send us into a publish that fails the run.
+          for i in 1 2 3; do
+            if npm view "pi-sleep-agent@$VERSION" version >/dev/null 2>&1; then
+              echo "pi-sleep-agent@$VERSION already published; skipping."
+              exit 0
+            fi
+            echo "attempt $i: pi-sleep-agent@$VERSION not visible yet"
+            sleep 15
+          done
+          # No `|| true`: a failed publish must fail the job, or a green run lies.
+          npm publish --access public
