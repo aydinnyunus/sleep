@@ -13,16 +13,23 @@ on:
         type: boolean
         default: false
 
-# GitHub Release + tag creation need write access to the repo. npm publish uses
-# the NPM_TOKEN secret, NOT this token.
+# GitHub Release + tag creation need write access to the repo. npm publish does
+# NOT use a stored token: it authenticates with npm Trusted Publishing (OIDC), so
+# there is no long-lived NPM_TOKEN secret to rotate or to let go stale. That is
+# also why this file is named in the trusted publisher on npmjs.com.
 #
-# NPM_TOKEN secret: the npm account has 2FA set to auth-and-writes with a passkey.
-# A passkey can't drive CI, so create an automation token once and store it as the
-# repo/org secret NPM_TOKEN:
-#   npm token create --type automation
-# (automation tokens skip the two-factor prompt, so `npm publish` runs headless.)
+# Two things have to stay true for the publish to work, and both of them failed
+# silently the first time this path ran for real (0.8.24, 2026-11-16):
+#   `id-token: write` must be granted below, or the runner cannot mint the OIDC
+#   token npm exchanges for a publish credential, and the registry answers 404 as
+#   if the package did not exist.
+#   npm must be 11.5.1 or newer, because older versions cannot do the exchange.
+#   Node 22 ships npm 10, so the publish step installs a newer npm explicitly.
+# The one-time npmjs.com side (package -> Settings -> Trusted Publisher) names this
+# repository and this workflow file.
 permissions:
   contents: write
+  id-token: write
 
 jobs:
   build:
@@ -110,9 +117,14 @@ jobs:
       - name: Publish to npm (skip only when the registry already serves the version)
         if: steps.tag.outputs.publish == 'true'
         env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
           VERSION: ${{ steps.version.outputs.version }}
         run: |
+          # OIDC exchange needs npm 11.5.1+; the setup-node above pins Node 22,
+          # which ships npm 10, so the publish runs on an explicitly newer CLI.
+          # Without this the registry answers 404 on a package that exists, which
+          # is the failure this step's first real run produced.
+          npm install -g npm@^11.5.1
+          npm --version
           # registry-viewer can lag behind the write. An E404 on a version that
           # IS live would otherwise send us into a publish that fails the run.
           for i in 1 2 3; do
@@ -123,5 +135,7 @@ jobs:
             echo "attempt $i: pi-sleep-agent@$VERSION not visible yet"
             sleep 15
           done
-          # No `|| true`: a failed publish must fail the job, or a green run lies.
+          # No `--provenance` flag and no token: `id-token: write` plus the trusted
+          # publisher on npmjs.com make npm attach provenance on its own. No `|| true`
+          # either: a failed publish must fail the job, or a green run lies.
           npm publish --access public
