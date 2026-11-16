@@ -58,7 +58,13 @@ def cmd_status(a) -> int:
     bc = store.buffer_counts()
     cands = store.list_candidates(with_body=True)
     prov = [c for c in cands if c.get("status") == "provisional"]
+    # A refusal is a verdict, and a promoted record's file lives in the archive after
+    # `set_status` moves it there. Reading candidates/ alone hid every refusal on a
+    # record that had been promoted first, which is most of them.
     ref = [c for c in cands if c.get("status") == "refused"]
+    ref += [m for m in store._archived_candidates(with_body=True)
+            if m.get("status") == "refused"]
+    ref.sort(key=lambda c: str(c.get("reviewed") or c.get("ts") or ""))
     q = [f for f in os.listdir(paths.quarantine_dir()) if f.endswith(".json")]
     mdir = paths.memory_dir(a.cwd or None)
     try:
@@ -69,6 +75,19 @@ def cmd_status(a) -> int:
     _p("sleep memory: T0=disposable captures, T1=provisional awaiting review, T2=permanent (promote-only)")
     try:
         _p(replay_mod.quality_line())
+    except Exception:
+        pass
+    # "Did sleep ever run, and if not why" used to be unanswerable from the store: a
+    # skipped pass wrote one line to a log nobody reads while `state.json` kept the
+    # previous run's numbers, so thirteen silent nights looked like a healthy store.
+    # The last attempt is stamped now, and this is the surface that shows it.
+    try:
+        st = paths.read_state()
+        skip = st.get("last_sleep_skip") or {}
+        if skip:
+            _p("last attempt   %s  (%s; %d skipped in a row)"
+               % (st.get("last_sleep_attempt", "?"), skip.get("reason", "?"),
+                  int(st.get("sleep_skip_count", 0))))
     except Exception:
         pass
     line = "T0 buffer      %d records / %d files / %d bytes  (captured while you worked)" % (bc["records"], bc["files"], bc["bytes"])

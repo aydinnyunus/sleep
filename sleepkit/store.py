@@ -321,7 +321,10 @@ def refused_collision(text: str, threshold: float = REFUSED_DUP_THRESHOLD) -> tu
     why this gate uses it instead of similarity().
     """
     best, score = "", 0.0
-    for m in list_candidates(with_body=True):
+    # A refused record can sit in candidates/ (a demote reopens one there) or in the
+    # archive (a refused record that was promoted first). Reading one place would let a
+    # rejected idea return as a fresh review by moving its file, so both are read.
+    for m in list_candidates(with_body=True) + _archived_candidates(with_body=True):
         if m.get("status") != "refused":
             continue
         s = ngram_similarity(text, m.get("_body", ""))
@@ -563,7 +566,32 @@ def set_status(cid: str, status: str, extra: dict | None = None) -> bool:
             loc = paths.archive_dir("candidates")
     with open(os.path.join(loc, cid + ".md"), "w", encoding="utf-8") as fh:
         fh.write(emit(meta, body))
+    # A promoted record belongs in the archive, not in the pool a reviewer reads.
+    # `promote` used to make that move by hand, so any other path that set the status
+    # left the file behind in candidates/. The rule lives here now, in one place.
+    _relocate_for_status(cid, status)
     return True
+
+
+def _relocate_for_status(cid: str, status: str) -> None:
+    """Keep a promoted file in the archive, and bring a re-opened one back.
+
+    `archive/candidates/` is where a promoted record's T1 file becomes history, and
+    that move used to live in `promote` alone, so `set_status(..., "promoted")` from
+    any other path left the file in the review pool. A refusal is not that move: it is
+    a verdict a reviewer must still be shown, which is what `status` and `keep` read.
+    """
+    cand = os.path.join(paths.candidates_dir(), cid + ".md")
+    arch = os.path.join(paths.archive_dir("candidates"), cid + ".md")
+    if status == "promoted":
+        if os.path.isfile(cand):
+            shutil.move(cand, arch)
+    elif os.path.isfile(arch) and not os.path.isfile(cand):
+        # Re-opened: a demote retracts a T2 copy and the T1 record it came from has to
+        # come back to the pool, because that is where `promote` and `status` read it.
+        # Leaving it in the archive let `promote` miss the refusal entirely and write a
+        # second T2 file for a record a human had just retracted.
+        shutil.move(arch, cand)
 
 
 # ------------------------------------------------------------ promotion -----
@@ -604,6 +632,12 @@ def promote(cid: str, memory_dir: str | None = None, dry_run: bool = False,
     meta, body = got
     if meta.get("status") == "promoted":
         return False, "already promoted: " + cid
+    if meta.get("status") == "refused":
+        # A refusal is a verdict a human already gave. `demote` retracts an approved T2
+        # record by marking it refused, so promoting it again would re-approve the exact
+        # memory someone just took back - and it wrote a SECOND T2 file when it did.
+        return False, ("refusing to promote a record judged wrong: " + cid
+                       + "; clear the refusal first if that judgement changed")
     src = meta.get("source", "inferred")
     if src != "user" and meta.get("trust") == "speculative":
         return False, ("refusing to persist speculative memory from source=%s; "
@@ -656,9 +690,10 @@ def promote(cid: str, memory_dir: str | None = None, dry_run: bool = False,
     if confirmed:
         extra.update({"source": "user", "confirmed_by": "user",
                       "confirmed_at": meta.get("confirmed_at")})
+    # `set_status` files the record: a promoted status leaves the review pool for the
+    # archive, which is the same move this line used to make by hand. Doing it in both
+    # places moved the file twice and the second move failed on a source that was gone.
     set_status(cid, "promoted", extra)
-    shutil.move(os.path.join(paths.candidates_dir(), cid + ".md"),
-                os.path.join(paths.archive_dir("candidates"), cid + ".md"))
     return True, "wrote %s; index %s" % (dest, why)
 
 
@@ -822,6 +857,17 @@ def demote(cid: str, memory_dir: str | None = None, dry_run: bool = False,
     dest = meta.get("promoted_to") or ""
     mdir = memory_dir or paths.memory_dir()
     slug = os.path.basename(dest)[:-3] if dest else ""
+    # `promoted_to` records the absolute path T2 had WHEN the record was promoted, and
+    # T2 moved: the store lives in `.sleep/memory` now while every archived record still
+    # points at the host memory tree it was promoted into. Retracting that stale path
+    # marked a file nobody reads any more (and missed the canonical one entirely), which
+    # is how a demoted memory kept reading as active. Resolve by slug against the
+    # directory that is authoritative now, and fall back to the recorded path only when
+    # no such slug exists there.
+    if slug and mdir:
+        live = os.path.join(mdir, slug + ".md")
+        if os.path.isfile(live):
+            dest = live
     if dry_run:
         return True, "would retract %s (drop index line, mark candidate refused)" % (slug or cid)
     stamp = paths.now()
@@ -896,8 +942,12 @@ def permanent_records(memory_dir: str | None = None) -> list:
     return out
 
 
-def _archived_candidates() -> list:
-    """Parsed frontmatter of archived candidates (promoted/superseded records live there)."""
+def _archived_candidates(with_body: bool = False) -> list:
+    """Parsed frontmatter of archived candidates (promoted/superseded records live there).
+
+    `with_body` is what lets a caller print an archived body: the refusal gate has to
+    score an archived text, and a listing that shows a verdict needs the text it judged.
+    """
     out = []
     d = paths.archive_dir("candidates")
     if not os.path.isdir(d):
@@ -905,11 +955,15 @@ def _archived_candidates() -> list:
     for name in sorted(os.listdir(d)):
         if not name.endswith(".md"):
             continue
+        p = os.path.join(d, name)
         try:
-            with open(os.path.join(d, name), encoding="utf-8") as fh:
-                meta, _body = parse(fh.read())
+            with open(p, encoding="utf-8") as fh:
+                meta, body = parse(fh.read())
         except (OSError, ValueError):
             continue
+        meta["_path"] = p
+        if with_body:
+            meta["_body"] = body
         out.append(meta)
     return out
 

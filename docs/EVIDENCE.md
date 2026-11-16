@@ -820,3 +820,69 @@ Tests: `test_an_agent_sourced_preference_needs_the_users_own_confirmation` and
 The flag does not make an agent's reading true. It records that a person read one and
 agreed, which is the only thing that can make it permanent, and the receipt is on the
 record. A later reader who doubts the memory can see that a human confirmed it and when.
+
+
+## The refusal verdict, and three ways a promoted record's file went missing
+
+Found by auditing this machine's own store rather than a fixture: `status` reported
+`T1 candidates  0 provisional, 1 refused, 2 total` while the refused record it named
+(`c1793493665d665`, the ai-evaluator-pass skill payload that had been captured as a
+user-stated preference) was filed in `archive/candidates/`, and `nightly.log` held
+13 consecutive `skipped` verdicts whose `state.json` recorded none of them.
+
+**A promoted file was moved by whichever path promoted it.** `promote` made the
+`candidates/ -> archive/candidates/` move by hand after calling `set_status`, so any
+other caller that set `status: promoted` left the file in the review pool. Moving it
+into `set_status` (one place, every caller) surfaced a double-move immediately:
+`FileNotFoundError: [Errno 2] No such file or directory: '.../home/.sleep/candidates/curl.md'`
+from `promote`'s own `shutil.move` on a source that had already gone, which 5 CLI tests
+caught (`test_status_lists_permanent_with_review_date_and_source`, and the promote
+tests behind it).
+
+**A demote left the record it retracted in the archive.** After `status: refused` was
+written, the T1 file stayed in `archive/candidates/`, so `get_candidate` read it from
+there and `promote` - which only checked `status == "promoted"` - re-approved a record a
+human had just taken back, writing a second T2 file
+(`...x-route-blue-header-required-820f.md` beside the retracted
+`...x-route-blue-header-required.md`). Reproduced in a temp sandbox on the store API
+before the fix, and closed by two changes: `_relocate_for_status` brings a re-opened
+record back to `candidates/`, and `promote` refuses `status: refused` with
+`refusing to promote a record judged wrong`. `tests/test_cli.py::Gates::test_demote_unapproves_a_promoted_memory_and_surfaces_it_as_retracted_refused`
+pins the second half and failed before the fix with `AssertionError: 0 == 0`.
+
+**Which directory a refused record lives in is read, not assumed.** Two pinned
+contracts decided the design and they point opposite ways: `refuse` keeps the record in
+`candidates/` (`test_refuse_records_the_verdict_and_keeps_the_record_out_of_t2` reads
+`candidates/cbad.md`), while `promote` moves it to the archive. So the refusal gate and
+`status` read both: `refused_collision` scans `list_candidates(with_body=True) +
+_archived_candidates(with_body=True)`, otherwise a rejected idea returns as a fresh
+review just by moving its file. `_archived_candidates` gained `with_body` for that.
+
+**A test fixture had to learn the same thing.** `tests/test_core.py::setUp` cleared
+`archive/buffer` but not `archive/candidates`, so once the gate read the archive a
+refused record left by one test made an unrelated later test fail as a paraphrase
+(`duplicate of earlier refusal c17948302724809 (0.64)`). Two tests were affected; the
+dir is in the wipe list now.
+
+**A stale absolute path made `demote` retract the wrong copy.** Every archived record's
+`promoted_to` still names the host memory tree it was promoted into
+(`/Users/yunus.aydin/.claude-work/projects/-Users-yunus-aydin/memory/...`) while T2 now
+lives in `~/.sleep/memory`, and both copies exist on this machine - 11 files each. The
+retraction marked the stale path and missed the canonical one, so a demoted memory kept
+reading as active. `demote` resolves the slug against the authoritative `memory_dir`
+first and falls back to the recorded path only when no such slug exists there.
+
+**A skipped pass now says it happened.** `run_sleep` stamps `last_sleep_attempt`,
+`last_sleep_skip` (reason + gate numbers) and increments `sleep_skip_count` when the gate
+stops it, and `status` prints `last attempt <ts> (<reason>; N skipped in a row)`. Measured
+on a temp store: `run_sleep(min_records=3, min_interval_hours=0)` wrote
+`sleep_skip_count: 1` with `reason: "buffer has 0 record(s), needs 3"`, and a following
+`dry_run=True` left the state byte-identical (`state degismedi: True`). `last_sleep` stays
+the last real consolidation; the two fields answer different questions and the CLI test
+`test_sleep_dry_run_reports_a_thin_buffer_and_writes_nothing` failed when a first draft
+wrote state on the dry-run path too.
+
+Tests: `tests/test_core.py` 78/78, `tests/test_cli.py` 174 tests with 4 pre-existing
+`TransportSelection` import errors (present at baseline, `ModuleNotFoundError: No module
+named 'sleepkit'` when the class runs without the module-level path setup),
+`tests/test_package.py` 3/3, `ruff check sleepkit/ tests/` clean.

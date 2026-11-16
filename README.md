@@ -43,7 +43,26 @@ Sleep adds a reviewable memory cycle to nine selectable coding-agent targets. It
   `--no-doctor-gate`) restores the flat policy exactly. Scoring reads the hygiene report only;
   it makes no model call, so the unattended path spends nothing new.
 - **Review before permanence.** New memories stay provisional until you promote or refuse them.
+- **A refusal is a verdict, not a queue entry.** `refuse` records a judgement, and the record
+  keeps its text and its place in the review pool so `status` can show what was judged and
+  why. That is the opposite of promotion, which moves the record's T1 file out of the pool and
+  into the archive because its T2 copy is now canonical; `set_status` makes that move for every
+  path instead of `promote` doing it by hand, so no caller can leave a promoted file behind in
+  `candidates/`. A refused record cannot be promoted again until the refusal is cleared, and
+  `demote` reopens the record it retracted rather than leaving it in the archive, so a memory
+  someone just took back is not silently re-approved the next time it is promoted (it used to
+  write a second T2 file when it was).
+  Both directories are read by the two things that need the whole picture: the refusal gate
+  (`refused_collision`, so a rejected idea cannot return as a fresh review just by moving its
+  file) and `status`, whose refused list prints archived refusals too.
 - **Nightly dream cycle.** Mine repeated preferences, consolidate recent observations, and measure memory effects while you are away.
+- **A skipped pass is recorded.** Sleep not running used to leave one line in a log nobody
+  reads while `state.json` kept the previous run's numbers, so thirteen silent nights looked
+  like a healthy store. Every attempt now stamps `last_sleep_attempt`, keeps the reason and the
+  gate numbers in `last_sleep_skip`, and counts consecutive skips in `sleep_skip_count`;
+  `status` prints it as `last attempt <ts> (<reason>; N skipped in a row)`. `last_sleep` is
+  left alone, because that field answers when memory last changed, not when sleep last looked.
+  A `--dry-run` still writes nothing.
 - **Measured replay.** Run the same task with memory off and on before deciding whether a memory helps. Each completed pass leaves a one-line quality summary (`helps / hurts / ties`) in `status` and in the nightly report, so the question stays answerable between passes; a pass whose two arms ran the same prompt says it measured nothing instead of reporting zeros.
 - **Kind-aware lifetimes.** A record's `kind` decides how long a quiet stretch is normal.
   `doctor` measures each provisional against its own row instead of one flat cutoff: a fact is
@@ -299,6 +318,10 @@ Reject an incorrect candidate without deleting its audit trail:
 ```bash
 ./sleep.py refuse <candidate-id> --note "Incorrect for the current deployment."
 ```
+
+The rejected record stays in T1: `status` lists it under `refused` with your note, and a later
+`promote` of the same id is refused with `refusing to promote a record judged wrong` until the
+judgement changes. Nothing is deleted, so the text that was judged is still readable.
 
 ## Day-to-day workflow
 

@@ -577,6 +577,20 @@ def run_sleep(session=None, model=None, budget_usd=1.0, min_records=3,
     if detail:
         gate["urgency_detail"] = detail
     if not ok and not force:
+        if not dry_run:
+            # A pass that decided not to run is still a pass that happened, and the only
+            # record of it used to be a line in a log nobody reads: `state.json` kept the
+            # previous run numbers while 13 consecutive nights were skipped, so whether
+            # sleep ever ran was unanswerable from the store. The attempt is stamped and
+            # the reason kept; `last_sleep` stays the last real consolidation, because
+            # that field answers when memory last changed, not when we last looked. A
+            # dry run wrote nothing before this line existed and still writes nothing.
+            state = paths.read_state()
+            state["last_sleep_attempt"] = paths.now()
+            state["last_sleep_skip"] = {"action": "skipped", "reason": reason,
+                                        "buffer_records": records, "gate": gate}
+            state["sleep_skip_count"] = int(state.get("sleep_skip_count", 0)) + 1
+            paths.write_state(state)
         return {"action": "skipped", "reason": reason, "buffer_records": records,
                 "gate": gate}
     if dry_run:

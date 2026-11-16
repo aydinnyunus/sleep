@@ -52,7 +52,11 @@ GOLD_ANSWERS = {
 
 class T(unittest.TestCase):
     def setUp(self):
-        for sub in ("buffer", "candidates", ".quarantine", "pending", "archive/buffer"):
+        # archive/candidates is live state too: the refusal gate reads it (a refused
+        # record that was promoted first lives there), so a refused record left behind
+        # by one test used to make an unrelated later test look like a paraphrase.
+        for sub in ("buffer", "candidates", ".quarantine", "pending", "archive/buffer",
+                    "archive/candidates"):
             d = os.path.join(TMP, sub)
             os.makedirs(d, exist_ok=True)
             for f in os.listdir(d):
