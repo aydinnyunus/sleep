@@ -513,6 +513,38 @@ Use another home for testing or for a separate memory pool:
 SLEEP_HOME=/tmp/my-sleep ./sleep.py status -v
 ```
 
+### Development builds
+
+A build can be published without shipping a version. `tools/dev-release.sh` asks
+the release workflow for a stamped build, and the workflow publishes it under the
+`dev` dist-tag:
+
+```bash
+npm i pi-sleep-agent@dev    # the newest build
+npm i pi-sleep-agent        # still the last released version
+```
+
+Two versions therefore exist at once and only one of them is a promise. `latest`
+moves when `package.json` changes and a real version ships; a build carries a
+`-dev.<UTC minute>` suffix, leaves the manifest's number alone, and skips the
+GitHub Release, because a Releases page is a record of shipped versions and a
+build every five minutes would bury it.
+
+Install it as a LaunchAgent for a build every five minutes (macOS). The plist
+lives beside the other user agents, not in this repository:
+
+```bash
+launchctl bootstrap gui/$(id -u) \
+  ~/Library/LaunchAgents/com.aydinnyunus.pi-sleep-dev-release.plist
+launchctl print gui/$(id -u)/com.aydinnyunus.pi-sleep-dev-release | grep runs
+```
+
+The script prints nothing when it works and one line to
+`~/.sleep/logs/dev-release.log` when it does not, so an empty log is the healthy
+state. It refuses to dispatch while a previous build is still running, because a
+second stamp taken mid-build would try to publish a version the first one is
+about to take.
+
 ### Where permanent memory is written
 
 T2 lives in one fixed place: `$SLEEP_HOME/memory` (`~/.sleep/memory` by default).
