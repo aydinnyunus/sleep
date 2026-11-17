@@ -539,6 +539,9 @@ launchctl bootstrap gui/$(id -u) \
 launchctl print gui/$(id -u)/com.aydinnyunus.pi-sleep-dev-release | grep runs
 ```
 
+Stop it again with `launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/com.aydinnyunus.pi-sleep-dev-release.plist`.
+The plist stays on disk, so the `bootstrap` line above brings it back.
+
 The script prints nothing when it works and one line to
 `~/.sleep/logs/dev-release.log` when it does not, so an empty log is the healthy
 state. It refuses to dispatch while a previous build is still running, because a
