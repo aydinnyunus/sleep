@@ -86,17 +86,40 @@ jobs:
         id: version
         run: |
           VER=$(node -p "require('./package.json').version")
-          # A dev build is stamped, not bumped: package.json stays at the last
-          # real version so a stray run cannot rewrite the repo's own number.
-          # The stamp is UTC to the minute and the tag is unique per run, which
-          # is what lets two builds in the same hour publish without colliding.
+          # A dev build is stamped, not bumped. The stamp has to land in the file
+          # itself: `npm publish` reads the version from package.json and ignores
+          # any variable this step exports, so a stamp that lives only in
+          # $GITHUB_OUTPUT publishes the un-stamped number and collides with the
+          # version the first dev build already took (measured on 2026-11-17,
+          # where the log said `npm notice version: 0.8.24` for a `-dev.` run).
+          #
+          # The edit is confined to the runner's checkout - nothing here is
+          # committed or pushed - so the repository's own number is untouched.
+          # UTC to the minute is what makes each build's version unique.
           if [ "${{ inputs.dev_release }}" = "true" ]; then
             STAMP=$(date -u +%Y%m%d%H%M)
             VER="$VER-dev.$STAMP"
-            echo "prerelease=true" >> "$GITHUB_OUTPUT"
+            # Rewrite the one line, not the whole file: JSON.stringify would
+            # reformat the manifest and strip the trailing newline, which turns a
+            # version bump into a whole-file diff for anyone comparing the
+            # tarball's manifest with the repository's.
+            # shellcheck disable=SC2016  # $1/$2 are node's, not the shell's
+            node -e '
+              const fs = require("fs");
+              const raw = fs.readFileSync("package.json", "utf8");
+              const next = raw.replace(
+                /("version"\s*:\s*")[^"]*(")/,
+                "$1" + process.argv[1] + "$2"
+              );
+              if (next === raw) {
+                console.error("no version line rewrote; refusing to publish an unstamped build");
+                process.exit(1);
+              }
+              fs.writeFileSync("package.json", next);
+            ' "$VER"
+            echo "package.json now carries: $(node -p "require('./package.json').version")"
             echo "dist_tag=dev" >> "$GITHUB_OUTPUT"
           else
-            echo "prerelease=false" >> "$GITHUB_OUTPUT"
             echo "dist_tag=latest" >> "$GITHUB_OUTPUT"
           fi
           echo "version=$VER" >> "$GITHUB_OUTPUT"
