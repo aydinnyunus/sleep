@@ -12,6 +12,14 @@ on:
         description: 'Publish even though the v<version> tag already exists'
         type: boolean
         default: false
+      # A build stamp, not a release: the version gets a `-dev.<UTC stamp>`
+      # suffix and publishes under the `dev` dist-tag, so `latest` never moves
+      # and nobody installing the package by name receives an unfinished build.
+      # Use this when the point is "a fresh build exists", not "a version shipped".
+      dev_release:
+        description: 'Publish a -dev.<UTC> build on the dev dist-tag (latest untouched)'
+        type: boolean
+        default: false
 
 # GitHub Release + tag creation need write access to the repo. npm publish takes
 # whichever of two credentials the repo has, in this order:
@@ -29,6 +37,14 @@ on:
 # 11.5.1+ before it runs. Where the OIDC path is used, the one-time npmjs.com side
 # (package -> Settings -> Trusted Publisher) has to name this repository and this
 # workflow file; the token path needs no such setting, only the secret.
+#
+# Two kinds of run reach npm, and which one you get is the point of the
+# `dev_release` input:
+#   a real version, driven by a change to `package.json`, publishes to `latest`;
+#   a stamped build (`0.8.<n>-dev.<UTC minute>`) publishes to `dev`, keeps
+#   `package.json` untouched, and skips the GitHub Release. Runs in a loop are
+#   meant to be the second kind, because `latest` is a promise to everyone who
+#   installs the package by name and a machine on a timer cannot make it.
 permissions:
   contents: write
   id-token: write
@@ -70,6 +86,19 @@ jobs:
         id: version
         run: |
           VER=$(node -p "require('./package.json').version")
+          # A dev build is stamped, not bumped: package.json stays at the last
+          # real version so a stray run cannot rewrite the repo's own number.
+          # The stamp is UTC to the minute and the tag is unique per run, which
+          # is what lets two builds in the same hour publish without colliding.
+          if [ "${{ inputs.dev_release }}" = "true" ]; then
+            STAMP=$(date -u +%Y%m%d%H%M)
+            VER="$VER-dev.$STAMP"
+            echo "prerelease=true" >> "$GITHUB_OUTPUT"
+            echo "dist_tag=dev" >> "$GITHUB_OUTPUT"
+          else
+            echo "prerelease=false" >> "$GITHUB_OUTPUT"
+            echo "dist_tag=latest" >> "$GITHUB_OUTPUT"
+          fi
           echo "version=$VER" >> "$GITHUB_OUTPUT"
       - name: Check whether v<version> tag already exists (idempotency)
         id: tag
@@ -91,18 +120,27 @@ jobs:
           # Publishing is a separate question from tagging. The npm step has its
           # own already-live guard, and the Release step is idempotent in gh, so
           # this only decides whether to ask them at all.
-          if [ "${{ inputs.force_publish }}" = "true" ]; then
+          if [ "${{ inputs.dev_release }}" = "true" ]; then
+            # A stamped build always publishes, and it never creates a GitHub
+            # Release: the Releases page is a record of shipped versions, and a
+            # build every few minutes would bury it under noise.
             echo "publish=true" >> "$GITHUB_OUTPUT"
+            echo "release=false" >> "$GITHUB_OUTPUT"
+            echo "dev build; publishing without a GitHub Release."
+          elif [ "${{ inputs.force_publish }}" = "true" ]; then
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+            echo "release=true" >> "$GITHUB_OUTPUT"
             echo "force_publish requested; running the release and publish steps."
           else
             # RELReleased is set in both branches above; do not re-read this step's own
             # outputs here, actionlint rejects self-reference within a step.
             PUBLISH="${RELReleased:-false}"
             echo "publish=$PUBLISH" >> "$GITHUB_OUTPUT"
+            echo "release=$PUBLISH" >> "$GITHUB_OUTPUT"
           fi
       - name: Create GitHub Release
         id: release
-        if: steps.tag.outputs.publish == 'true'
+        if: steps.tag.outputs.release == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -120,6 +158,12 @@ jobs:
         if: steps.tag.outputs.publish == 'true'
         env:
           VERSION: ${{ steps.version.outputs.version }}
+          # Which dist-tag the build lands on. `latest` is a promise to everyone
+          # who runs `npm i pi-sleep-agent`, so only a real version sets it; a
+          # stamped build goes to `dev`, where it can be installed by name and
+          # still cannot reach a normal install. npm's own default tag is
+          # `latest`, which is why passing this explicitly is the whole point.
+          DIST_TAG: ${{ steps.version.outputs.dist_tag }}
           # A stored automation token wins when the repo has one, because the
           # trusted publisher on npmjs.com is a one-time setting outside this
           # repo and cannot be created from here. With the secret absent the step
@@ -150,4 +194,5 @@ jobs:
           # No `--provenance` flag and no token: `id-token: write` plus the trusted
           # publisher on npmjs.com make npm attach provenance on its own. No `|| true`
           # either: a failed publish must fail the job, or a green run lies.
-          npm publish --access public
+          echo "publishing with --tag $DIST_TAG"
+          npm publish --access public --tag "$DIST_TAG"
